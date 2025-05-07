@@ -11,3 +11,15 @@ type App struct {
 	Conn   net.Conn
 	Logger *util.Logger
 }
+
+func (a *App) IsServer() bool {
+	return a.Config.TargetAddr == ""
+}
+
+func (a *App) IsReadOnly() bool {
+	return a.Config.ReadOnly
+}
+
+func (a *App) IsWriteOnly() bool {
+	return a.Config.WriteOnly
+}
