@@ -1,7 +1,6 @@
 package main
 
 import (
-	"local-file-sharer/cmd/sharego/app"
 	"local-file-sharer/internal/config"
 	"local-file-sharer/internal/network"
 	"local-file-sharer/internal/util"
@@ -11,32 +10,35 @@ func main() {
 	cfg := config.Load()
 	log := util.NewLogger(cfg.Verbose, "Main")
 
-	a := &app.App{
-		Config: cfg,
-		Logger: log,
-	}
-
 	log.Info("Starting P2P File Sharer")
-	printConfig(a)
+	printConfig(cfg, log)
 
-	if cfg.TargetAddr != "" {
+	app := network.NewApp(cfg, log)
+
+	if cfg.TargetAddr != "" && !cfg.DualMode {
 		log.Info("Starting in client mode, connecting to %s", cfg.TargetAddr)
-		network.StartDial(a)
-	} else {
+		network.StartDial(app)
+	} else if cfg.TargetAddr == "" {
 		log.Info("Starting in server mode, listening on %s", cfg.ListenAddr)
-		network.StartListening(a)
+		network.StartListening(app)
+	} else {
+		log.Info("Starting in dual mode (client+server)")
+		log.Info("Listening on %s", cfg.ListenAddr)
+		log.Info("Connecting to %s", cfg.TargetAddr)
+		network.StartListening(app)
 	}
 }
 
-func printConfig(app *app.App) {
-	app.Logger.Info("Current Configuration:")
-	app.Logger.Debug("IP:        %v", app.Config.TargetAddr)
-	app.Logger.Debug("Listen:    %s", app.Config.ListenAddr)
-	app.Logger.Debug("Folder:    %s", app.Config.Folder)
-	app.Logger.Debug("Name:      %s", app.Config.Name)
-	app.Logger.Debug("ReadOnly:  %t", app.Config.ReadOnly)
-	app.Logger.Debug("WriteOnly: %t", app.Config.WriteOnly)
-	app.Logger.Debug("MaxSize:   %d", app.Config.MaxSize)
-	app.Logger.Debug("Verify:    %t", app.Config.Verify)
-	app.Logger.Debug("Verbose:   %t", app.Config.Verbose)
+func printConfig(cfg *config.Config, log *util.Logger) {
+	log.Info("Current Configuration:")
+	log.Debug("IP:        %v", cfg.TargetAddr)
+	log.Debug("Listen:    %s", cfg.ListenAddr)
+	log.Debug("Folder:    %s", cfg.Folder)
+	log.Debug("Name:      %s", cfg.Name)
+	log.Debug("ReadOnly:  %t", cfg.ReadOnly)
+	log.Debug("WriteOnly: %t", cfg.WriteOnly)
+	log.Debug("MaxSize:   %d", cfg.MaxSize)
+	log.Debug("Verify:    %t", cfg.Verify)
+	log.Debug("Verbose:   %t", cfg.Verbose)
+	log.Debug("DualMode:  %t", cfg.DualMode)
 }
