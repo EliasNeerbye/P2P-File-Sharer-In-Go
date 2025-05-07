@@ -76,3 +76,13 @@ func (a *App) GetCurrentTransfers() []*FileTransfer {
 	}
 	return transfers
 }
+
+func (a *App) GetTransfers() []*FileTransfer {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	transfers := make([]*FileTransfer, 0, len(a.Transfers))
+	for _, t := range a.Transfers {
+		transfers = append(transfers, t)
+	}
+	return transfers
+}

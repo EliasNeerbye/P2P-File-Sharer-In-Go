@@ -396,9 +396,9 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 			Data: fmt.Sprintf("Failed to open file: %v", err),
 		}
 	}
-	defer file.Close()
 
 	transfer := NewFileTransfer(filePath, info.Size(), TransferTypeSend, c)
+	transfer.File = file // Store the file in the transfer object
 	c.App.AddTransfer(transfer)
 
 	startMsg := Message{
@@ -415,6 +415,7 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 	go func() {
 		defer c.App.RemoveTransfer(transfer)
+		defer file.Close()
 
 		buffer := make([]byte, 8192)
 		totalSent := int64(0)
@@ -809,8 +810,12 @@ func (c *Connection) handleFileStart(msg Message) {
 }
 
 func (c *Connection) handleFileData(msg Message) {
+	// Use thread-safe access to get all transfers
+	transfers := c.App.GetTransfers()
 	var transfer *FileTransfer
-	for _, t := range c.App.Transfers {
+
+	// Find the transfer that matches the connection and type
+	for _, t := range transfers {
 		if t.Conn == c && t.Type == TransferTypeReceive {
 			transfer = t
 			break
@@ -819,6 +824,12 @@ func (c *Connection) handleFileData(msg Message) {
 
 	if transfer == nil {
 		c.SendError("No active file transfer")
+		return
+	}
+
+	// Check if the file is valid
+	if transfer.File == nil {
+		c.SendError("File not open for writing")
 		return
 	}
 
@@ -844,8 +855,11 @@ func (c *Connection) handleFileData(msg Message) {
 func (c *Connection) handleFileEnd(msg Message) {
 	filePath := msg.Data
 
+	// Use thread-safe access to get all transfers
+	transfers := c.App.GetTransfers()
 	var transfer *FileTransfer
-	for _, t := range c.App.Transfers {
+
+	for _, t := range transfers {
 		if t.Conn == c && t.Type == TransferTypeReceive && t.Name == filePath {
 			transfer = t
 			break
