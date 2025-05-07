@@ -6,6 +6,7 @@ import (
 	"local-file-sharer/internal/util"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -172,7 +173,33 @@ func (p *CommandParser) handleCD(args []string) error {
 	}
 
 	path := args[0]
-	return os.Chdir(path)
+
+	// Security check to prevent escaping shared folder
+	baseFolder := p.App.Config.Folder
+	absBase, err := filepath.Abs(baseFolder)
+	if err != nil {
+		return fmt.Errorf("failed to resolve base folder path: %v", err)
+	}
+
+	targetPath := filepath.Join(baseFolder, path)
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve target path: %v", err)
+	}
+
+	if !strings.HasPrefix(absTarget, absBase) {
+		return fmt.Errorf("access denied: path is outside the shared folder")
+	}
+
+	// Change to the target directory
+	if err := os.Chdir(absTarget); err != nil {
+		return err
+	}
+
+	// Update the folder config to match
+	p.App.Config.Folder = absTarget
+
+	return nil
 }
 
 func (p *CommandParser) handleRemoteCD(args []string) error {

@@ -14,6 +14,23 @@ import (
 	"time"
 )
 
+func isPathSafe(requestedPath, baseFolder string) bool {
+	// Get absolute paths
+	absBase, err := filepath.Abs(baseFolder)
+	if err != nil {
+		return false
+	}
+
+	targetPath := filepath.Join(baseFolder, requestedPath)
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false
+	}
+
+	// Check if target path is within the base folder
+	return strings.HasPrefix(absTarget, absBase)
+}
+
 type Connection struct {
 	ID                string
 	Conn              net.Conn
@@ -44,14 +61,12 @@ func NewConnection(conn net.Conn, app *App, isClient bool) *Connection {
 	return c
 }
 
-// Register a handler function for a specific response
 func (c *Connection) RegisterResponseHandler(id string, handler func(Message)) {
 	c.responseHandlerMu.Lock()
 	defer c.responseHandlerMu.Unlock()
 	c.responseHandlers[id] = handler
 }
 
-// Unregister a response handler
 func (c *Connection) UnregisterResponseHandler(id string) {
 	c.responseHandlerMu.Lock()
 	defer c.responseHandlerMu.Unlock()
@@ -86,7 +101,6 @@ func (c *Connection) Start() {
 }
 
 func (c *Connection) Handshake() error {
-	// Send our name
 	handshake := Message{
 		Type: MsgTypeHandshake,
 		Data: c.Name,
@@ -96,7 +110,6 @@ func (c *Connection) Handshake() error {
 		return fmt.Errorf("failed to send handshake: %v", err)
 	}
 
-	// Read their name
 	line, err := c.Reader.ReadString('\n')
 	if err != nil {
 		return fmt.Errorf("failed to read handshake: %v", err)
@@ -119,6 +132,18 @@ func (c *Connection) Close() {
 	c.Conn.Close()
 	c.App.RemoveConnection(c)
 	c.Log.Info("Connection closed")
+
+	// Handle disconnection based on application mode
+	if c.isClient && !c.App.Config.DualMode {
+		c.Log.Error("Lost connection to server, exiting...")
+		fmt.Println("\nDisconnected from server. Press Enter to exit.")
+
+		// Give a moment for log messages to be displayed
+		time.Sleep(500 * time.Millisecond)
+
+		// Exit the application
+		os.Exit(1)
+	}
 }
 
 func (c *Connection) SendMessage(msg Message) error {
@@ -129,6 +154,13 @@ func (c *Connection) SendMessage(msg Message) error {
 
 	_, err = c.Writer.WriteString(string(data) + "\n")
 	if err != nil {
+		c.Log.Error("Failed to send message: %v", err)
+
+		// If this is a client and not in dual mode, handle disconnection
+		if c.isClient && !c.App.Config.DualMode {
+			c.Close() // This will trigger the exit logic
+		}
+
 		return err
 	}
 
@@ -142,7 +174,6 @@ func (c *Connection) handleMessage(messageStr string) {
 		return
 	}
 
-	// Check if there's a registered handler for this message ID
 	if msg.ID != "" {
 		c.responseHandlerMu.Lock()
 		handler, exists := c.responseHandlers[msg.ID]
@@ -154,7 +185,6 @@ func (c *Connection) handleMessage(messageStr string) {
 		}
 	}
 
-	// Otherwise process the message by type
 	switch msg.Type {
 	case MsgTypeCommand:
 		c.handleCommand(msg)
@@ -172,6 +202,8 @@ func (c *Connection) handleMessage(messageStr string) {
 		c.Log.Error("Remote error: %s", msg.Data)
 	case MsgTypeMessage:
 		fmt.Printf("\n%s[MESSAGE FROM %s]%s %s\n", util.Bold+util.Purple, c.RemoteName, util.Reset, msg.Data)
+	case MsgTypeCommandResult:
+		fmt.Println(msg.Data)
 	default:
 		c.Log.Warn("Unknown message type: %s", msg.Type)
 	}
@@ -180,81 +212,114 @@ func (c *Connection) handleMessage(messageStr string) {
 func (c *Connection) handleCommand(msg Message) {
 	cmd := ParseCommand(msg.Data)
 	if cmd == nil {
-		c.SendError("Invalid command format")
+		errorMsg := Message{
+			Type: MsgTypeError,
+			Data: "Invalid command format",
+			ID:   msg.ID,
+		}
+		c.SendMessage(errorMsg)
 		return
 	}
 
 	c.Log.Debug("Received command: %s", cmd.Name)
 
+	var response Message
+
 	switch cmd.Name {
 	case "LS", "LIST":
-		c.handleListCommand(cmd)
+		response = c.handleListCommand(cmd)
 	case "CDR":
-		c.handleCDCommand(cmd)
+		response = c.handleCDCommand(cmd)
 	case "GET":
-		c.handleGetCommand(cmd)
+		response = c.handleGetCommand(cmd)
 	case "PUT":
-		c.handlePutCommand(cmd)
+		response = c.handlePutCommand(cmd)
 	case "INFO":
-		c.handleInfoCommand(cmd)
+		response = c.handleInfoCommand(cmd)
 	case "GETDIR":
-		c.handleGetDirCommand(cmd)
+		response = c.handleGetDirCommand(cmd)
 	case "PUTDIR":
-		c.handlePutDirCommand(cmd)
+		response = c.handlePutDirCommand(cmd)
 	case "GETM":
-		c.handleGetMultipleCommand(cmd)
+		response = c.handleGetMultipleCommand(cmd)
 	case "PUTM":
-		c.handlePutMultipleCommand(cmd)
+		response = c.handlePutMultipleCommand(cmd)
 	case "STATUS":
-		c.handleStatusCommand(cmd)
+		response = c.handleStatusCommand(cmd)
 	default:
-		c.SendError(fmt.Sprintf("Unknown command: %s", cmd.Name))
+		response = Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Unknown command: %s", cmd.Name),
+		}
 	}
+
+	response.ID = msg.ID
+	c.SendMessage(response)
 }
 
-func (c *Connection) SendError(errorMsg string) {
+func (c *Connection) SendError(errorMsg string) error {
 	msg := Message{
 		Type: MsgTypeError,
 		Data: errorMsg,
 	}
-	c.SendMessage(msg)
+	return c.SendMessage(msg)
 }
 
-func (c *Connection) handleCDCommand(cmd *Command) {
+func (c *Connection) handleCDCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
-		c.SendError("CDR requires a directory path")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "CDR requires a directory path",
+		}
 	}
 
 	path := cmd.Args[0]
+
+	// Security check
+	if !isPathSafe(path, c.App.Config.Folder) {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Access denied: path is outside the shared folder",
+		}
+	}
+
 	fullPath := filepath.Join(c.App.Config.Folder, path)
 
-	// Check if directory exists
 	info, err := os.Stat(fullPath)
 	if os.IsNotExist(err) {
-		c.SendError(fmt.Sprintf("Directory not found: %s", path))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Directory not found: %s", path),
+		}
 	}
 
 	if !info.IsDir() {
-		c.SendError(fmt.Sprintf("Not a directory: %s", path))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Not a directory: %s", path),
+		}
 	}
 
-	// Change to the directory (this only affects future file operations)
 	c.App.Config.Folder = fullPath
 
-	response := Message{
+	return Message{
 		Type: MsgTypeCommandResult,
 		Data: fmt.Sprintf("Changed to %s", path),
 	}
-	c.SendMessage(response)
 }
 
-func (c *Connection) handleListCommand(cmd *Command) {
+func (c *Connection) handleListCommand(cmd *Command) Message {
 	path := "."
 	if len(cmd.Args) > 0 {
 		path = cmd.Args[0]
+	}
+
+	// Security check
+	if !isPathSafe(path, c.App.Config.Folder) {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Access denied: path is outside the shared folder",
+		}
 	}
 
 	recursive := cmd.Name == "LSR"
@@ -263,72 +328,91 @@ func (c *Connection) handleListCommand(cmd *Command) {
 
 	files, err := util.ListFiles(path, c.App.Config.Folder, recursive)
 	if err != nil {
-		c.SendError(fmt.Sprintf("Failed to list files: %v", err))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Failed to list files: %v", err),
+		}
 	}
 
-	response := Message{
+	return Message{
 		Type: MsgTypeCommandResult,
 		Data: strings.Join(files, "\n"),
 	}
-	c.SendMessage(response)
 }
 
-func (c *Connection) handleGetCommand(cmd *Command) {
+func (c *Connection) handleGetCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
-		c.SendError("GET requires a file path")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "GET requires a file path",
+		}
 	}
 
 	filePath := cmd.Args[0]
 
-	// Check read-only mode
+	// Security check
+	if !isPathSafe(filePath, c.App.Config.Folder) {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Access denied: path is outside the shared folder",
+		}
+	}
+
 	if c.App.Config.ReadOnly {
-		c.SendError("This node is in read-only mode and cannot send files")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "This node is in read-only mode and cannot send files",
+		}
 	}
 
 	fullPath := filepath.Join(c.App.Config.Folder, filePath)
 
 	info, err := os.Stat(fullPath)
 	if err != nil {
-		c.SendError(fmt.Sprintf("File not found: %v", err))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("File not found: %v", err),
+		}
 	}
 
 	if info.IsDir() {
-		c.SendError("GET cannot transfer directories, use GETDIR instead")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "GET cannot transfer directories, use GETDIR instead",
+		}
 	}
 
-	// Check max size
 	if c.App.Config.MaxSize > 0 && info.Size() > int64(c.App.Config.MaxSize*1024*1024) {
-		c.SendError(fmt.Sprintf("File size exceeds maximum allowed size of %d MB", c.App.Config.MaxSize))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("File size exceeds maximum allowed size of %d MB", c.App.Config.MaxSize),
+		}
 	}
 
 	file, err := os.Open(fullPath)
 	if err != nil {
-		c.SendError(fmt.Sprintf("Failed to open file: %v", err))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Failed to open file: %v", err),
+		}
 	}
 	defer file.Close()
 
-	// Start a file transfer
 	transfer := NewFileTransfer(filePath, info.Size(), TransferTypeSend, c)
 	c.App.AddTransfer(transfer)
 
-	// Send file start message
 	startMsg := Message{
 		Type: MsgTypeFileStart,
 		Data: fmt.Sprintf("%s|%d", filePath, info.Size()),
 	}
 	if err := c.SendMessage(startMsg); err != nil {
-		c.SendError(fmt.Sprintf("Failed to send file start: %v", err))
-		return
+		c.App.RemoveTransfer(transfer)
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Failed to send file start: %v", err),
+		}
 	}
 
-	// Start the transfer in a goroutine
 	go func() {
 		defer c.App.RemoveTransfer(transfer)
 
@@ -363,12 +447,11 @@ func (c *Connection) handleGetCommand(cmd *Command) {
 			totalSent += int64(n)
 			transfer.BytesTransferred = totalSent
 
-			// Send progress updates (every 5%)
 			progress := (totalSent * 100) / info.Size()
 			if progress > lastProgress+4 {
 				lastProgress = progress
 				elapsedTime := time.Since(startTime).Seconds()
-				speed := float64(totalSent) / elapsedTime / 1024 // KB/s
+				speed := float64(totalSent) / elapsedTime / 1024
 
 				progMsg := Message{
 					Type: MsgTypeProgress,
@@ -380,7 +463,6 @@ func (c *Connection) handleGetCommand(cmd *Command) {
 			}
 		}
 
-		// Send file end message
 		endMsg := Message{
 			Type: MsgTypeFileEnd,
 			Data: filePath,
@@ -391,10 +473,8 @@ func (c *Connection) handleGetCommand(cmd *Command) {
 			return
 		}
 
-		// Wait for ACK
 		transfer.Status = TransferStatusWaitingAck
 
-		// Timeout if no ACK received
 		go func() {
 			time.Sleep(10 * time.Second)
 			if transfer.Status == TransferStatusWaitingAck {
@@ -403,30 +483,35 @@ func (c *Connection) handleGetCommand(cmd *Command) {
 			}
 		}()
 	}()
+
+	return Message{
+		Type: MsgTypeCommandResult,
+		Data: fmt.Sprintf("Starting file transfer: %s", filePath),
+	}
 }
 
-func (c *Connection) handlePutCommand(cmd *Command) {
-	// Implementation will be handled via file transfer messages
+func (c *Connection) handlePutCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
-		c.SendError("PUT requires a file path")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "PUT requires a file path",
+		}
 	}
 
-	// Check write-only mode
 	if c.App.Config.WriteOnly {
-		c.SendError("This node is in write-only mode and cannot receive files")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "This node is in write-only mode and cannot receive files",
+		}
 	}
 
-	// Acknowledge the command
-	response := Message{
+	return Message{
 		Type: MsgTypeCommandResult,
 		Data: "Ready to receive file",
 	}
-	c.SendMessage(response)
 }
 
-func (c *Connection) handleInfoCommand(cmd *Command) {
+func (c *Connection) handleInfoCommand(cmd *Command) Message {
 	info := fmt.Sprintf("Node: %s\n", c.Name)
 	info += fmt.Sprintf("Folder: %s\n", c.App.Config.Folder)
 	info += fmt.Sprintf("Read-only: %t\n", c.App.Config.ReadOnly)
@@ -437,134 +522,163 @@ func (c *Connection) handleInfoCommand(cmd *Command) {
 		info += "Max file size: Unlimited\n"
 	}
 
-	response := Message{
+	return Message{
 		Type: MsgTypeCommandResult,
 		Data: info,
 	}
-	c.SendMessage(response)
 }
 
-func (c *Connection) handleGetDirCommand(cmd *Command) {
+func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
-		c.SendError("GETDIR requires a directory path")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "GETDIR requires a directory path",
+		}
 	}
 
 	dirPath := cmd.Args[0]
 
-	// Check read-only mode
+	// Security check
+	if !isPathSafe(dirPath, c.App.Config.Folder) {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Access denied: path is outside the shared folder",
+		}
+	}
+
 	if c.App.Config.ReadOnly {
-		c.SendError("This node is in read-only mode and cannot send files")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "This node is in read-only mode and cannot send files",
+		}
 	}
 
 	fullPath := filepath.Join(c.App.Config.Folder, dirPath)
 
 	info, err := os.Stat(fullPath)
 	if err != nil {
-		c.SendError(fmt.Sprintf("Directory not found: %v", err))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Directory not found: %v", err),
+		}
 	}
 
 	if !info.IsDir() {
-		c.SendError("GETDIR can only transfer directories, use GET for files")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "GETDIR can only transfer directories, use GET for files",
+		}
 	}
 
-	// Get list of files in directory
 	files, err := util.ListFilesRecursive(fullPath)
 	if err != nil {
-		c.SendError(fmt.Sprintf("Failed to list directory: %v", err))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Failed to list directory: %v", err),
+		}
 	}
 
-	// Send directory structure first
 	dirMsg := Message{
 		Type: MsgTypeCommandResult,
 		Data: strings.Join(files, "\n"),
 	}
 	c.SendMessage(dirMsg)
 
-	// Then transfer each file
 	for _, file := range files {
 		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
 		relPath = strings.TrimPrefix(relPath, "/")
 
 		info, err := os.Stat(file)
 		if err != nil || info.IsDir() {
-			continue // Skip directories
+			continue
 		}
 
-		// Create GET command for each file
 		getCmd := &Command{
 			Name: "GET",
 			Args: []string{relPath},
 		}
 		c.handleGetCommand(getCmd)
 
-		// Small delay between files
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	return Message{
+		Type: MsgTypeCommandResult,
+		Data: fmt.Sprintf("Sending directory: %s", dirPath),
 	}
 }
 
-func (c *Connection) handlePutDirCommand(cmd *Command) {
+func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
-		c.SendError("PUTDIR requires a directory path")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "PUTDIR requires a directory path",
+		}
 	}
 
-	// Check write-only mode
+	// Security check
+	if !isPathSafe(cmd.Args[0], c.App.Config.Folder) {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Access denied: path is outside the shared folder",
+		}
+	}
+
 	if c.App.Config.WriteOnly {
-		c.SendError("This node is in write-only mode and cannot receive files")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "This node is in write-only mode and cannot receive files",
+		}
 	}
 
 	dirPath := cmd.Args[0]
 	fullPath := filepath.Join(c.App.Config.Folder, dirPath)
 
-	// Create directory if it doesn't exist
 	if err := os.MkdirAll(fullPath, 0755); err != nil {
-		c.SendError(fmt.Sprintf("Failed to create directory: %v", err))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Failed to create directory: %v", err),
+		}
 	}
 
-	// Acknowledge the command
-	response := Message{
+	return Message{
 		Type: MsgTypeCommandResult,
 		Data: "Ready to receive directory files",
 	}
-	c.SendMessage(response)
-
-	// The rest will be handled by file transfer messages
 }
 
-func (c *Connection) handleGetMultipleCommand(cmd *Command) {
+func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
-		c.SendError("GETM requires a file pattern")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "GETM requires a file pattern",
+		}
 	}
 
 	pattern := cmd.Args[0]
 
-	// Check read-only mode
 	if c.App.Config.ReadOnly {
-		c.SendError("This node is in read-only mode and cannot send files")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "This node is in read-only mode and cannot send files",
+		}
 	}
 
-	// Find matching files
 	matches, err := util.FindMatchingFiles(c.App.Config.Folder, pattern)
 	if err != nil {
-		c.SendError(fmt.Sprintf("Failed to find matching files: %v", err))
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Failed to find matching files: %v", err),
+		}
 	}
 
 	if len(matches) == 0 {
-		c.SendError("No files match the pattern")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "No files match the pattern",
+		}
 	}
 
-	// Send list of files first
 	listMsg := Message{
 		Type: MsgTypeCommandResult,
 		Data: fmt.Sprintf("Found %d files matching pattern %s:\n%s",
@@ -572,55 +686,54 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) {
 	}
 	c.SendMessage(listMsg)
 
-	// Then transfer each file
 	for _, file := range matches {
 		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
 		relPath = strings.TrimPrefix(relPath, "/")
 
-		// Create GET command for each file
 		getCmd := &Command{
 			Name: "GET",
 			Args: []string{relPath},
 		}
 		c.handleGetCommand(getCmd)
 
-		// Small delay between files
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	return Message{
+		Type: MsgTypeCommandResult,
+		Data: fmt.Sprintf("Sending %d files matching pattern: %s", len(matches), pattern),
 	}
 }
 
-func (c *Connection) handlePutMultipleCommand(cmd *Command) {
+func (c *Connection) handlePutMultipleCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
-		c.SendError("PUTM requires a file pattern")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "PUTM requires a file pattern",
+		}
 	}
 
-	// Check write-only mode
 	if c.App.Config.WriteOnly {
-		c.SendError("This node is in write-only mode and cannot receive files")
-		return
+		return Message{
+			Type: MsgTypeError,
+			Data: "This node is in write-only mode and cannot receive files",
+		}
 	}
 
-	// Acknowledge the command
-	response := Message{
+	return Message{
 		Type: MsgTypeCommandResult,
 		Data: "Ready to receive multiple files",
 	}
-	c.SendMessage(response)
-
-	// The rest will be handled by file transfer messages
 }
 
-func (c *Connection) handleStatusCommand(cmd *Command) {
+func (c *Connection) handleStatusCommand(cmd *Command) Message {
 	transfers := c.App.GetCurrentTransfers()
 
 	if len(transfers) == 0 {
-		response := Message{
+		return Message{
 			Type: MsgTypeCommandResult,
 			Data: "No active transfers",
 		}
-		c.SendMessage(response)
-		return
 	}
 
 	var statusText string
@@ -637,11 +750,10 @@ func (c *Connection) handleStatusCommand(cmd *Command) {
 			t.ID, typeStr, t.Name, pct, t.Speed)
 	}
 
-	response := Message{
+	return Message{
 		Type: MsgTypeCommandResult,
 		Data: statusText,
 	}
-	c.SendMessage(response)
 }
 
 func (c *Connection) handleFileStart(msg Message) {
@@ -652,19 +764,24 @@ func (c *Connection) handleFileStart(msg Message) {
 	}
 
 	filePath := parts[0]
+
+	// Security check
+	if !isPathSafe(filePath, c.App.Config.Folder) {
+		c.SendError("Access denied: path is outside the shared folder")
+		return
+	}
+
 	fileSize, err := util.ParseInt64(parts[1])
 	if err != nil {
 		c.SendError("Invalid file size")
 		return
 	}
 
-	// Check max size
 	if c.App.Config.MaxSize > 0 && fileSize > int64(c.App.Config.MaxSize*1024*1024) {
 		c.SendError(fmt.Sprintf("File size exceeds maximum allowed size of %d MB", c.App.Config.MaxSize))
 		return
 	}
 
-	// Check write-only mode
 	if c.App.Config.WriteOnly {
 		c.SendError("This node is in write-only mode and cannot receive files")
 		return
@@ -672,21 +789,18 @@ func (c *Connection) handleFileStart(msg Message) {
 
 	fullPath := filepath.Join(c.App.Config.Folder, filePath)
 
-	// Create directory if it doesn't exist
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		c.SendError(fmt.Sprintf("Failed to create directory: %v", err))
 		return
 	}
 
-	// Create file
 	file, err := os.Create(fullPath)
 	if err != nil {
 		c.SendError(fmt.Sprintf("Failed to create file: %v", err))
 		return
 	}
 
-	// Start a file transfer
 	transfer := NewFileTransfer(filePath, fileSize, TransferTypeReceive, c)
 	transfer.File = file
 	c.App.AddTransfer(transfer)
@@ -695,7 +809,6 @@ func (c *Connection) handleFileStart(msg Message) {
 }
 
 func (c *Connection) handleFileData(msg Message) {
-	// Find the active transfer
 	var transfer *FileTransfer
 	for _, t := range c.App.Transfers {
 		if t.Conn == c && t.Type == TransferTypeReceive {
@@ -719,7 +832,6 @@ func (c *Connection) handleFileData(msg Message) {
 
 	transfer.BytesTransferred += int64(n)
 
-	// Update progress
 	if transfer.TotalSize > 0 {
 		progress := (transfer.BytesTransferred * 100) / transfer.TotalSize
 		if progress > transfer.LastProgress+4 {
@@ -732,7 +844,6 @@ func (c *Connection) handleFileData(msg Message) {
 func (c *Connection) handleFileEnd(msg Message) {
 	filePath := msg.Data
 
-	// Find the active transfer
 	var transfer *FileTransfer
 	for _, t := range c.App.Transfers {
 		if t.Conn == c && t.Type == TransferTypeReceive && t.Name == filePath {
@@ -746,13 +857,11 @@ func (c *Connection) handleFileEnd(msg Message) {
 		return
 	}
 
-	// Close the file
 	if transfer.File != nil {
 		transfer.File.Close()
 		transfer.File = nil
 	}
 
-	// Send ACK
 	ackMsg := Message{
 		Type: MsgTypeACK,
 		Data: filePath,
@@ -773,11 +882,9 @@ func (c *Connection) handleProgress(msg Message) {
 
 	filePath := parts[0]
 	received, _ := util.ParseInt64(parts[1])
-	// Using totalSize instead of total to avoid unused variable
 	totalSize, _ := util.ParseInt64(parts[2])
 	speed, _ := util.ParseFloat64(parts[3])
 
-	// Find the transfer
 	var transfer *FileTransfer
 	for _, t := range c.App.Transfers {
 		if t.Name == filePath && t.Conn == c {
@@ -788,7 +895,7 @@ func (c *Connection) handleProgress(msg Message) {
 
 	if transfer != nil {
 		transfer.BytesTransferred = received
-		transfer.TotalSize = totalSize // Use totalSize
+		transfer.TotalSize = totalSize
 		transfer.Speed = speed
 		transfer.UpdateProgress(received, speed)
 	}
@@ -797,7 +904,6 @@ func (c *Connection) handleProgress(msg Message) {
 func (c *Connection) handleAck(msg Message) {
 	filePath := msg.Data
 
-	// Find the transfer
 	var transfer *FileTransfer
 	for _, t := range c.App.Transfers {
 		if t.Name == filePath && t.Conn == c && t.Status == TransferStatusWaitingAck {
