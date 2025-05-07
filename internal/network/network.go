@@ -1,9 +1,7 @@
 package network
 
 import (
-	"fmt"
 	"local-file-sharer/cmd/sharego/app"
-	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -11,21 +9,21 @@ import (
 )
 
 func StartDial(app *app.App) {
+	log := app.Logger
 	conn, err := net.Dial("tcp", app.Config.TargetAddr)
 	if err != nil {
-		log.Fatal("Failed to dial peer: ", err)
+		log.Fatal("Failed to dial peer: %v", err)
 		return
 	}
 	defer conn.Close()
 
-	fmt.Println("Connected to peer: ", conn.RemoteAddr())
+	log.Success("Connected to peer: %s", conn.RemoteAddr())
 
 	// Send some data to the server
 	message := "Hello from the client!"
 	_, err = conn.Write([]byte(message))
 	if err != nil {
-		log.Printf("Error sending data to server: %v\n", err)
-		conn.Close()
+		log.Error("Error sending data to server: %v", err)
 		return
 	}
 
@@ -33,23 +31,23 @@ func StartDial(app *app.App) {
 	buffer := make([]byte, 1024)
 	_, err = conn.Read(buffer)
 	if err != nil {
-		log.Printf("Error reading server's response: %v\n", err)
-		conn.Close()
+		log.Error("Error reading server's response: %v", err)
 		return
 	}
 
-	fmt.Println("Received from server:", string(buffer))
+	log.Info("Received from server: %s", string(buffer))
 }
 
 func StartListening(app *app.App) {
+	log := app.Logger
 	ln, err := net.Listen("tcp", app.Config.ListenAddr)
 	if err != nil {
-		log.Fatal("Failed to start listener: ", err)
+		log.Fatal("Failed to start listener: %v", err)
 		return
 	}
 	defer ln.Close()
 
-	fmt.Println("Listening on", app.Config.ListenAddr)
+	log.Success("Listening on %s", app.Config.ListenAddr)
 
 	// Listen for interrupts to gracefully shut down
 	signals := make(chan os.Signal, 1)
@@ -57,7 +55,7 @@ func StartListening(app *app.App) {
 
 	go func() {
 		<-signals
-		fmt.Println("Shutting down listener...")
+		log.Warn("Shutting down listener...")
 		ln.Close()
 		os.Exit(0)
 	}()
@@ -65,33 +63,34 @@ func StartListening(app *app.App) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Println("Accept error: ", err)
+			log.Error("Accept error: %v", err)
 			continue
 		}
-		go handleConnection(conn)
+		go handleConnection(app, conn)
 	}
 }
 
-func handleConnection(conn net.Conn) {
-	fmt.Println("Handling connection from: ", conn.RemoteAddr())
+func handleConnection(app *app.App, conn net.Conn) {
+	log := app.Logger
+	log.Info("New connection from: %s", conn.RemoteAddr())
 
 	// Read data from the connection
 	buffer := make([]byte, 1024)
 	n, err := conn.Read(buffer)
 	if err != nil {
-		log.Printf("Error reading data from %v: %v\n", conn.RemoteAddr(), err)
+		log.Error("Error reading data from %v: %v", conn.RemoteAddr(), err)
 		conn.Close()
 		return
 	}
 
 	// Print received message
-	fmt.Printf("Received message: %s\n", string(buffer[:n]))
+	log.Debug("Received message: %s", string(buffer[:n]))
 
 	// Respond to the client
 	response := "Hello from the server!"
 	_, err = conn.Write([]byte(response))
 	if err != nil {
-		log.Printf("Error sending data to %v: %v\n", conn.RemoteAddr(), err)
+		log.Error("Error sending data to %v: %v", conn.RemoteAddr(), err)
 		conn.Close()
 		return
 	}

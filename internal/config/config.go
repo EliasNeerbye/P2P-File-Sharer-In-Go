@@ -22,7 +22,7 @@ type Config struct {
 func Load() *Config {
 	cfg := &Config{}
 
-	// Flag parsing
+	// Flag setup
 	flag.StringVar(&cfg.TargetAddr, "ip", "", "IP address and port of the peer to connect to (e.g., 192.168.1.10:8080)")
 	flag.StringVar(&cfg.ListenAddr, "listen", ":8080", "Local address and port to listen on (e.g., :8080)")
 	flag.StringVar(&cfg.Folder, "folder", ".", "Directory used for sharing files and saving downloads")
@@ -38,7 +38,7 @@ func Load() *Config {
 
 	// Validate listen address (deny full IPs)
 	if strings.Contains(cfg.ListenAddr, ".") || strings.Contains(cfg.ListenAddr, ":") && !strings.HasPrefix(cfg.ListenAddr, ":") {
-		fmt.Fprintln(os.Stderr, "Error: --listen should not include an IP address. Only a port or :port format is allowed.")
+		fmt.Fprintln(os.Stderr, "Error: -listen should not include an IP address. Only a port or :port format is allowed.")
 		os.Exit(1)
 	}
 
