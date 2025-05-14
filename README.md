@@ -2,100 +2,142 @@
 
 ## 📝 Overview
 
-This project is a lightweight, peer-to-peer file sharing tool that works on local networks.
+A lightweight, peer-to-peer file sharing tool for local networks. This application allows for easy file transfers between computers on the same network without requiring internet access or external servers.
+
+## ⭐ Key Features
+
+-   **Dual Mode Operation**: Run as client, server, or both simultaneously
+-   **Interactive Command Interface**: Easy-to-use command prompt for file operations
+-   **Bidirectional Transfers**: Send and receive files in both directions
+-   **Directory Transfers**: Transfer entire directories with a single command
+-   **Pattern Matching**: Select multiple files using wildcards
+-   **Transfer Controls**: Pause, resume, and cancel active transfers
+-   **Progress Tracking**: Real-time progress bars with speed and ETA
+-   **Security Controls**: Read-only and write-only modes, path validation
+-   **Size Limitations**: Configurable maximum file size
+-   **Concurrency**: Manage multiple simultaneous transfers
 
 ## 🛠️ Tech Stack
 
-| Component                | Technology                           | Justification                                                                                   |
-|--------------------------|--------------------------------------|-------------------------------------------------------------------------------------------------|
-| Programming Language     | Go                                   | Built-in support for networking and concurrency; produces standalone binaries.                |
-| Command-line Parsing     | Go flag package                      | Minimal external dependencies for parsing command-line arguments.                             |
-| Network Communication    | Go net package                       | Robust TCP/UDP support using the standard library.                                            |
-| File Transfer            | Go bufio & io packages               | Efficient file I/O with buffered operations and stream copying using `io.Copy`.                 |
-| Data Serialization       | Go encoding/json package             | Simple, clear JSON-based messaging for the custom protocol.                                   |
-| Logging                  | Standard log package (or a structured logger) | Explicit logging for tracing operations and debugging when `--verbose` is enabled.              |
-| Testing                  | Go testing package                   | Unit testing and integration testing to ensure code reliability.                              |
-
----
+| Component             | Technology                     | Details                                                                             |
+| --------------------- | ------------------------------ | ----------------------------------------------------------------------------------- |
+| Programming Language  | Go                             | Using Go's built-in networking, concurrency, and I/O capabilities                   |
+| Command-line Parsing  | Go flag package                | Parses command-line arguments with support for various connection modes             |
+| Network Communication | Go net package                 | TCP-based connections with custom protocol for reliable transfers                   |
+| File Transfer         | Go bufio & io packages         | Buffered I/O operations for efficient file transfers                                |
+| Protocol              | Custom JSON-based messaging    | Message types for commands, file transfers, progress updates, and acknowledgments   |
+| Directory Operations  | Go filepath & os packages      | Safe directory traversal with path validation to prevent escaping the shared folder |
+| Logging               | Custom logging system          | Color-coded logging with different verbosity levels                                 |
+| User Interface        | Terminal-based interactive CLI | Command parser with support for local and remote operations                         |
 
 ## 🚩 Command-Line Parameters
 
-| Flag           | Type    | Required | Default                 | Description                                                                                           |
-|----------------|---------|----------|-------------------------|-------------------------------------------------------------------------------------------------------|
-| `--ip`         | String  | Yes      | N/A                     | 🔌 IP address of the peer to connect to (e.g., `192.168.1.10`).                                       |
-| `--port`       | Integer | No       | `8080`                  | 🎯 Target port of the peer. Separating the port from the IP improves clarity and flexibility.         |
-| `--listen`     | String  | No       | Primary IP on 8080      | 👂 Local IP address and port to listen on for incoming connections.                                  |
-| `--folder`     | String  | No       | Current directory       | 📁 Directory used for sharing files and saving downloads.                                           |
-| `--name`       | String  | No       | System hostname         | 🏷️ A friendly identifier for your node. Helps confirm you're connecting to the correct peer.         |
-| `--readonly`   | Boolean | No       | false                   | 🔒 When enabled, restricts uploads—only downloads are allowed.                                      |
-| `--writeonly`  | Boolean | No       | false                   | 📤 When enabled, restricts downloads—only uploads are permitted.                                    |
-| `--maxsize`    | Integer | No       | Unlimited (or set limit)| 📏 Maximum file size in MB allowed for transfer.                                                    |
-| `--verify`     | Boolean | No       | true                    | ✅ Enables checksum verification (using crypto/md5/sha256) to ensure file integrity.                  |
-| `--verbose`    | Boolean | No       | false                   | 🔍 Enables detailed logging for network operations and file transfers, aiding debugging.             |
+| Flag          | Type    | Required | Default           | Description                                                           |
+| ------------- | ------- | -------- | ----------------- | --------------------------------------------------------------------- |
+| `--ip`        | String  | No       | ""                | 🔌 IP address of the peer to connect to (e.g., `192.168.1.10`)        |
+| `--port`      | Integer | No       | `8080`            | 🎯 Target port of the peer                                            |
+| `--listen`    | String  | No       | `:8080`           | 👂 Local IP address and port to listen on for incoming connections    |
+| `--folder`    | String  | No       | Current directory | 📁 Directory used for sharing files and saving downloads              |
+| `--name`      | String  | No       | System hostname   | 🏷️ A friendly identifier for your node                                |
+| `--readonly`  | Boolean | No       | false             | 🔒 When enabled, restricts uploads—only downloads are allowed         |
+| `--writeonly` | Boolean | No       | false             | 📤 When enabled, restricts downloads—only uploads are permitted       |
+| `--maxsize`   | Integer | No       | 0 (Unlimited)     | 📏 Maximum file size in MB allowed for transfer                       |
+| `--verify`    | Boolean | No       | true              | ✅ Enables checksum verification to ensure file integrity             |
+| `--verbose`   | Boolean | No       | false             | 🔍 Enables detailed logging for network operations and file transfers |
+| `--dual`      | Boolean | No       | false             | 🔄 Run as both client and server simultaneously                       |
 
----
+## 💻 Usage Examples
 
-## 🗺️ Roadmap
+### Starting as a Server (Just Listening)
 
-1. **Command-Line Interface & Configuration**
-   - **Parameter Parsing:** Use Go’s `flag` package to read command-line parameters and store them in a dedicated configuration struct.
-   - **Validation:** Validate the IP address, port, and folder permissions at startup. Report errors clearly.
-   - **Best Practices Applied:**  
-     - Use a dedicated configuration package to separate concerns.  
-     - Apply clear error messages and exit gracefully if validation fails.
+```
+./file-sharer --listen=:8080 --folder=./shared
+```
 
-2. **Network Connection & Dependency Injection**
-   - **Listener & Dialer:** Create a TCP listener using `net.Listen()` and connect using `net.Dial()`.  
-   - **Mutual Verification:** Implement a simple handshake protocol where both peers confirm readiness.
-   - **Concurrency:** Use goroutines and channels to manage connections concurrently.
-   - **Best Practices Applied:**  
-     - Avoid global state by passing configuration and dependencies explicitly through constructors.  
-     - Encapsulate network logic in its own package with well-defined interfaces.
+### Starting as a Client (Just Connecting)
 
-3. **File Transfer Functionality**
-   - **Buffered I/O:** Use `bufio` and `io.Copy` to efficiently transfer file chunks.
-   - **Integrity Checks:** Calculate checksums (MD5 or SHA256) to verify file integrity.
-   - **File Size Enforcement:** Use `io.LimitReader` to enforce maximum file size limits.
-   - **Best Practices Applied:**  
-     - Wrap file I/O operations with proper error handling and cleanup (using `defer` where appropriate).  
-     - Write unit tests for file chunking and checksum calculations.
+```
+./file-sharer --ip=192.168.1.10 --port=8080 --folder=./downloads
+```
 
-4. **User Interface & Logging**
-   - **CLI Prompts:** Use `bufio.Scanner` for interactive command prompts.
-   - **Status Updates:** Show connection and transfer progress clearly using simple terminal outputs.
-   - **Logging:** Centralize logging in a dedicated logger package that respects the `--verbose` flag.
-   - **Best Practices Applied:**  
-     - Use structured logging and document log messages for easier debugging.  
-     - Keep the main function minimal by delegating to packages.
+### Starting in Dual Mode (Both Listening and Connecting)
 
-5. **Testing, Documentation & CI**
-   - **Unit & Integration Tests:** Write tests using the standard `testing` package to cover all functionalities.
-   - **Documentation:** Include comprehensive comments and a README explaining the project setup, usage, and design choices.
-   - **CI/CD:** Set up automated tests with GitHub Actions or another CI tool to maintain code quality.
-   - **Best Practices Applied:**  
-     - Follow Go’s conventions for test naming and placement.  
-     - Ensure every public function is documented, and code is formatted with `go fmt` and vetted with `go vet`.
+```
+./file-sharer --ip=192.168.1.10 --listen=:8080 --dual --folder=./shared
+```
 
----
+### Starting with Restrictions
 
-## 🗂️ Folder Structure
+```
+./file-sharer --ip=192.168.1.10 --readonly --maxsize=100
+```
 
-This structure is intentionally minimal to help you learn core Go practices while keeping the code organized and maintainable:
+## 📋 Available Commands
 
-```plaintext
-sharego/
+Once the application is running, you'll see an interactive command prompt. Here are some of the available commands:
+
+### Local Commands
+
+-   `LS [path]` - List files in local directory
+-   `CD <path>` - Change local directory
+-   `PWD` - Show current working directory
+-   `INFO` - Show information about this node
+-   `HELP` - Show help message with all commands
+-   `QUIT` or `EXIT` - Exit the application
+
+### Remote Commands
+
+-   `LSR [path]` - List files in remote directory
+-   `CDR <path>` - Change remote directory
+-   `GET <file>` - Download a file from remote peer
+-   `PUT <file>` - Upload a file to remote peer
+-   `GETDIR [dir]` - Download a directory from remote peer
+-   `PUTDIR [dir]` - Upload a directory to remote peer
+-   `GETM <pattern>` - Download multiple files matching pattern
+-   `PUTM <pattern>` - Upload multiple files matching pattern
+-   `STATUS` - Show active transfers
+-   `MSG <message>` - Send a message to the remote peer
+
+### Transfer Control
+
+-   `PAUSE <id>` - Pause a file transfer
+-   `RESUME <id>` - Resume a paused transfer
+-   `CANCEL <id>` - Cancel an active transfer
+
+## 🗂️ Project Structure
+
+```
+local-file-sharer/
 ├── cmd/
-│   └── sharego/
-│       └── main.go           # Entry point: minimal setup, calls into internal packages
+│   └── main.go                # Application entry point
 ├── internal/
 │   ├── config/
-│   │   └── config.go         # Handles flag parsing, configuration struct, and validation
+│   │   └── config.go          # Command-line flags and configuration
 │   ├── network/
-│   │   └── connection.go     # Implements connection logic, handshake, and mutual verification
-│   ├── transfer/
-│   │   └── file_transfer.go  # File transfer logic, buffering, integrity checks, and size limits
+│   │   ├── app.go             # Application state management
+│   │   ├── client.go          # Client connection initialization
+│   │   ├── command.go         # Command parsing and execution
+│   │   ├── connection.go      # Connection management and message handling
+│   │   ├── protocol.go        # Message protocol definition
+│   │   ├── server.go          # Server listener implementation
+│   │   └── transfer.go        # File transfer operations
 │   └── util/
-│       └── logger.go         # Centralized logging and error helper functions
-├── go.mod                    # Module definition and dependency management
-└── README.md                 # Project documentation and usage instructions
+│       ├── file.go            # File and directory utility functions
+│       └── logger.go          # Logging system with colored output
+├── .gitignore                 # Git ignore file
+├── LICENSE                    # GNU GPL v3
+├── README.md                  # This file
+└── go.mod                     # Go module definition
 ```
+
+## 🔒 Security Considerations
+
+-   The application validates all file paths to prevent directory traversal attacks
+-   Both readonly and writeonly modes allow you to restrict operations
+-   File size limits can be set to prevent large file transfers
+-   All connections are authenticated with a simple handshake
+-   Note that this tool is designed for trusted local networks, not the public internet
+
+## 📄 License
+
+This project is licensed under the GNU General Public License v3 - see the LICENSE file for details.
