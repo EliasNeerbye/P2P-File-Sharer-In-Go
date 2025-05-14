@@ -2,6 +2,7 @@ package network
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +16,6 @@ import (
 )
 
 func isPathSafe(requestedPath, baseFolder string) bool {
-	// Get absolute paths
 	absBase, err := filepath.Abs(baseFolder)
 	if err != nil {
 		return false
@@ -27,7 +27,6 @@ func isPathSafe(requestedPath, baseFolder string) bool {
 		return false
 	}
 
-	// Check if target path is within the base folder
 	return strings.HasPrefix(absTarget, absBase)
 }
 
@@ -43,6 +42,7 @@ type Connection struct {
 	isClient          bool
 	responseHandlers  map[string]func(Message)
 	responseHandlerMu sync.Mutex
+	sendMutex         sync.Mutex
 }
 
 func NewConnection(conn net.Conn, app *App, isClient bool) *Connection {
@@ -133,38 +133,59 @@ func (c *Connection) Close() {
 	c.App.RemoveConnection(c)
 	c.Log.Info("Connection closed")
 
-	// Handle disconnection based on application mode
 	if c.isClient && !c.App.Config.DualMode {
 		c.Log.Error("Lost connection to server, exiting...")
 		fmt.Println("\nDisconnected from server. Press Enter to exit.")
 
-		// Give a moment for log messages to be displayed
 		time.Sleep(500 * time.Millisecond)
 
-		// Exit the application
 		os.Exit(1)
 	}
 }
 
 func (c *Connection) SendMessage(msg Message) error {
-	data, err := json.Marshal(msg)
+	c.sendMutex.Lock()
+	defer c.sendMutex.Unlock()
+
+	data, err := msg.Marshal()
 	if err != nil {
 		return err
 	}
+
+	c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer c.Conn.SetWriteDeadline(time.Time{})
 
 	_, err = c.Writer.WriteString(string(data) + "\n")
 	if err != nil {
 		c.Log.Error("Failed to send message: %v", err)
 
-		// If this is a client and not in dual mode, handle disconnection
 		if c.isClient && !c.App.Config.DualMode {
-			c.Close() // This will trigger the exit logic
+			c.Close()
 		}
 
 		return err
 	}
 
 	return c.Writer.Flush()
+}
+
+func (c *Connection) SendReliableMessage(msg Message) error {
+	maxRetries := 3
+	retryDelay := 100 * time.Millisecond
+
+	var err error
+	for i := 0; i < maxRetries; i++ {
+		err = c.SendMessage(msg)
+		if err == nil {
+			return nil
+		}
+
+		c.Log.Warn("Message send failed (attempt %d/%d): %v", i+1, maxRetries, err)
+		time.Sleep(retryDelay)
+		retryDelay *= 2
+	}
+
+	return fmt.Errorf("failed to send message after %d attempts: %v", maxRetries, err)
 }
 
 func (c *Connection) handleMessage(messageStr string) {
@@ -275,7 +296,6 @@ func (c *Connection) handleCDCommand(cmd *Command) Message {
 
 	path := cmd.Args[0]
 
-	// Security check
 	if !isPathSafe(path, c.App.Config.Folder) {
 		return Message{
 			Type: MsgTypeError,
@@ -314,7 +334,6 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		path = cmd.Args[0]
 	}
 
-	// Security check
 	if !isPathSafe(path, c.App.Config.Folder) {
 		return Message{
 			Type: MsgTypeError,
@@ -324,9 +343,16 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 
 	recursive := cmd.Name == "LSR"
 
-	filepath.Abs(filepath.Join(c.App.Config.Folder, path))
+	fullPath := filepath.Join(c.App.Config.Folder, path)
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Failed to resolve path: %v", err),
+		}
+	}
 
-	files, err := util.ListFiles(path, c.App.Config.Folder, recursive)
+	files, err := util.ListFiles(absPath, c.App.Config.Folder, recursive)
 	if err != nil {
 		return Message{
 			Type: MsgTypeError,
@@ -334,10 +360,30 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		}
 	}
 
+	relPath, _ := filepath.Rel(c.App.Config.Folder, absPath)
+	if relPath == "" {
+		relPath = "."
+	}
+	result := fmt.Sprintf("Contents of %s:\n%s", relPath, strings.Join(files, "\n"))
+
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: strings.Join(files, "\n"),
+		Data: result,
 	}
+}
+
+func (c *Connection) canInitiateTransfer() bool {
+	c.App.mu.Lock()
+	defer c.App.mu.Unlock()
+
+	activeCount := 0
+	for _, t := range c.App.Transfers {
+		if t.Status == TransferStatusInProgress {
+			activeCount++
+		}
+	}
+
+	return activeCount < 3
 }
 
 func (c *Connection) handleGetCommand(cmd *Command) Message {
@@ -348,9 +394,15 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		}
 	}
 
+	if !c.canInitiateTransfer() {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Too many active transfers, please wait for current transfers to complete",
+		}
+	}
+
 	filePath := cmd.Args[0]
 
-	// Security check
 	if !isPathSafe(filePath, c.App.Config.Folder) {
 		return Message{
 			Type: MsgTypeError,
@@ -398,14 +450,15 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 	}
 
 	transfer := NewFileTransfer(filePath, info.Size(), TransferTypeSend, c)
-	transfer.File = file // Store the file in the transfer object
+	transfer.File = file
 	c.App.AddTransfer(transfer)
 
 	startMsg := Message{
 		Type: MsgTypeFileStart,
 		Data: fmt.Sprintf("%s|%d", filePath, info.Size()),
 	}
-	if err := c.SendMessage(startMsg); err != nil {
+	if err := c.SendReliableMessage(startMsg); err != nil {
+		file.Close()
 		c.App.RemoveTransfer(transfer)
 		return Message{
 			Type: MsgTypeError,
@@ -417,10 +470,12 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		defer c.App.RemoveTransfer(transfer)
 		defer file.Close()
 
-		buffer := make([]byte, 8192)
+		buffer := make([]byte, 262144)
 		totalSent := int64(0)
 		lastProgress := int64(0)
+		lastProgressBytes := int64(0)
 		startTime := time.Now()
+		chunksSent := 0
 
 		for {
 			n, err := file.Read(buffer)
@@ -434,11 +489,7 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 				break
 			}
 
-			dataMsg := Message{
-				Type:   MsgTypeFileData,
-				Data:   string(buffer[:n]),
-				Binary: true,
-			}
+			dataMsg := NewBinaryMessage(MsgTypeFileData, buffer[:n])
 			if err := c.SendMessage(dataMsg); err != nil {
 				transfer.Status = TransferStatusFailed
 				c.Log.Error("Failed to send file data: %v", err)
@@ -447,10 +498,12 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 			totalSent += int64(n)
 			transfer.BytesTransferred = totalSent
+			chunksSent++
 
 			progress := (totalSent * 100) / info.Size()
-			if progress > lastProgress+4 {
+			if totalSent-lastProgressBytes > 1048576 || progress > lastProgress+2 {
 				lastProgress = progress
+				lastProgressBytes = totalSent
 				elapsedTime := time.Since(startTime).Seconds()
 				speed := float64(totalSent) / elapsedTime / 1024
 
@@ -462,13 +515,17 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 				transfer.UpdateProgress(totalSent, speed)
 			}
+
+			if chunksSent%20 == 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
 		}
 
 		endMsg := Message{
 			Type: MsgTypeFileEnd,
 			Data: filePath,
 		}
-		if err := c.SendMessage(endMsg); err != nil {
+		if err := c.SendReliableMessage(endMsg); err != nil {
 			transfer.Status = TransferStatusFailed
 			c.Log.Error("Failed to send file end: %v", err)
 			return
@@ -506,6 +563,13 @@ func (c *Connection) handlePutCommand(cmd *Command) Message {
 		}
 	}
 
+	if !c.canInitiateTransfer() {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Too many active transfers, please wait for current transfers to complete",
+		}
+	}
+
 	return Message{
 		Type: MsgTypeCommandResult,
 		Data: "Ready to receive file",
@@ -539,7 +603,6 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 
 	dirPath := cmd.Args[0]
 
-	// Security check
 	if !isPathSafe(dirPath, c.App.Config.Folder) {
 		return Message{
 			Type: MsgTypeError,
@@ -617,7 +680,6 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 		}
 	}
 
-	// Security check
 	if !isPathSafe(cmd.Args[0], c.App.Config.Folder) {
 		return Message{
 			Type: MsgTypeError,
@@ -766,7 +828,6 @@ func (c *Connection) handleFileStart(msg Message) {
 
 	filePath := parts[0]
 
-	// Security check
 	if !isPathSafe(filePath, c.App.Config.Folder) {
 		c.SendError("Access denied: path is outside the shared folder")
 		return
@@ -810,11 +871,9 @@ func (c *Connection) handleFileStart(msg Message) {
 }
 
 func (c *Connection) handleFileData(msg Message) {
-	// Use thread-safe access to get all transfers
 	transfers := c.App.GetTransfers()
 	var transfer *FileTransfer
 
-	// Find the transfer that matches the connection and type
 	for _, t := range transfers {
 		if t.Conn == c && t.Type == TransferTypeReceive {
 			transfer = t
@@ -827,13 +886,22 @@ func (c *Connection) handleFileData(msg Message) {
 		return
 	}
 
-	// Check if the file is valid
 	if transfer.File == nil {
 		c.SendError("File not open for writing")
 		return
 	}
 
-	data := []byte(msg.Data)
+	var data []byte
+	var err error
+	if msg.Binary {
+		data = []byte(msg.Data)
+	} else {
+		data, err = base64.StdEncoding.DecodeString(msg.Data)
+		if err != nil {
+			data = []byte(msg.Data)
+		}
+	}
+
 	n, err := transfer.File.Write(data)
 	if err != nil {
 		c.SendError(fmt.Sprintf("Failed to write file: %v", err))
@@ -855,7 +923,6 @@ func (c *Connection) handleFileData(msg Message) {
 func (c *Connection) handleFileEnd(msg Message) {
 	filePath := msg.Data
 
-	// Use thread-safe access to get all transfers
 	transfers := c.App.GetTransfers()
 	var transfer *FileTransfer
 
@@ -880,7 +947,7 @@ func (c *Connection) handleFileEnd(msg Message) {
 		Type: MsgTypeACK,
 		Data: filePath,
 	}
-	c.SendMessage(ackMsg)
+	c.SendReliableMessage(ackMsg)
 
 	transfer.Status = TransferStatusComplete
 	c.Log.Success("File transfer complete: %s", filePath)

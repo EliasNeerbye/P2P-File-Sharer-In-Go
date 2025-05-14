@@ -14,6 +14,7 @@ const (
 	TransferStatusComplete   = "complete"
 	TransferStatusFailed     = "failed"
 	TransferStatusWaitingAck = "waiting_ack"
+	TransferStatusPaused     = "paused"
 )
 
 type FileTransfer struct {
@@ -29,34 +30,52 @@ type FileTransfer struct {
 	Conn             *Connection
 	File             *os.File
 	LastProgress     int64
+	LastProgressTime time.Time
+	AvgSpeed         float64
+	Retries          int
 }
 
 func NewFileTransfer(name string, size int64, transferType string, conn *Connection) *FileTransfer {
+	now := time.Now()
 	return &FileTransfer{
 		Name:             name,
 		Type:             transferType,
 		Status:           TransferStatusInProgress,
 		TotalSize:        size,
 		BytesTransferred: 0,
-		StartTime:        time.Now(),
-		LastUpdate:       time.Now(),
+		StartTime:        now,
+		LastUpdate:       now,
+		LastProgressTime: now,
 		Speed:            0,
+		AvgSpeed:         0,
 		Conn:             conn,
 	}
 }
 
 func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
+	now := time.Now()
+	elapsed := now.Sub(t.LastProgressTime).Seconds()
+	
+	if elapsed > 0 && t.LastProgressTime != t.StartTime {
+		currentSpeed := float64(bytesTransferred-t.BytesTransferred) / elapsed / 1024
+		if t.AvgSpeed == 0 {
+			t.AvgSpeed = currentSpeed
+		} else {
+			t.AvgSpeed = 0.7*t.AvgSpeed + 0.3*currentSpeed
+		}
+		speed = t.AvgSpeed
+	}
+	
 	t.BytesTransferred = bytesTransferred
 	t.Speed = speed
-	t.LastUpdate = time.Now()
+	t.LastUpdate = now
+	t.LastProgressTime = now
 
-	// Calculate percentage
 	var percentage float64
 	if t.TotalSize > 0 {
 		percentage = float64(t.BytesTransferred) * 100 / float64(t.TotalSize)
 	}
 
-	// Calculate ETA
 	var eta string
 	if speed > 0 {
 		remainingBytes := t.TotalSize - t.BytesTransferred
@@ -72,15 +91,30 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		eta = "calculating..."
 	}
 
-	// Print progress
 	progBar := generateProgressBar(percentage, 30)
 	typeStr := "↓ Receiving"
 	if t.Type == TransferTypeSend {
 		typeStr = "↑ Sending"
 	}
 
+	fmt.Printf("\r%-50s", " ")
 	fmt.Printf("\r%s %s: %s %.1f%% (%.2f KB/s) ETA: %s",
 		typeStr, t.Name, progBar, percentage, speed, eta)
+}
+
+func (t *FileTransfer) Pause() {
+	if t.Status == TransferStatusInProgress {
+		t.Status = TransferStatusPaused
+		fmt.Printf("\nTransfer paused: %s\n", t.Name)
+	}
+}
+
+func (t *FileTransfer) Resume() {
+	if t.Status == TransferStatusPaused {
+		t.Status = TransferStatusInProgress
+		t.LastProgressTime = time.Now()
+		fmt.Printf("\nTransfer resumed: %s\n", t.Name)
+	}
 }
 
 func generateProgressBar(percentage float64, width int) string {

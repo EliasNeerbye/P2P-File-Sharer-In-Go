@@ -21,11 +21,8 @@ func StartDial(app *App) {
 	connection := NewConnection(conn, app, true)
 	app.AddConnection(connection)
 
-	// Start the connection handling
 	go connection.Start()
 
-	// If not in dual mode, start the command interface here
-	// This ensures the command interface starts after connection
 	if !app.Config.DualMode {
 		StartCommandInterface(app)
 	}

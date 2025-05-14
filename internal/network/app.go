@@ -33,7 +33,6 @@ func (a *App) Shutdown() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Close all connections
 	for _, conn := range a.Connections {
 		conn.Conn.Close()
 	}
@@ -85,4 +84,37 @@ func (a *App) GetTransfers() []*FileTransfer {
 		transfers = append(transfers, t)
 	}
 	return transfers
+}
+
+func (a *App) IsActiveTransferInProgress() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	
+	activeCount := 0
+	for _, transfer := range a.Transfers {
+		if transfer.Status == TransferStatusInProgress {
+			activeCount++
+		}
+	}
+	
+	return activeCount >= 3
+}
+
+func (a *App) GetConnectionByID(id string) *Connection {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	
+	return a.Connections[id]
+}
+
+func (a *App) GetActiveConnections() []*Connection {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	
+	conns := make([]*Connection, 0, len(a.Connections))
+	for _, conn := range a.Connections {
+		conns = append(conns, conn)
+	}
+	
+	return conns
 }

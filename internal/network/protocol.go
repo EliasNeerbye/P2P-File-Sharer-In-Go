@@ -2,7 +2,7 @@ package network
 
 import (
 	"encoding/base64"
-	"strings"
+	"encoding/json"
 )
 
 const (
@@ -32,40 +32,34 @@ func NewMessage(msgType, data string) Message {
 	}
 }
 
+func NewBinaryMessage(msgType string, data []byte) Message {
+	return Message{
+		Type:   msgType,
+		Data:   string(data),
+		Binary: true,
+	}
+}
+
 func (m *Message) Marshal() ([]byte, error) {
 	if m.Binary {
-
 		m.Data = base64.StdEncoding.EncodeToString([]byte(m.Data))
 		m.Binary = false
 	}
 
-	var b strings.Builder
-	b.WriteString(`{"type":"`)
-	b.WriteString(m.Type)
-	b.WriteString(`","data":"`)
-	b.WriteString(escapeJSON(m.Data))
-	b.WriteString(`"`)
-
-	if m.ID != "" {
-		b.WriteString(`,"id":"`)
-		b.WriteString(m.ID)
-		b.WriteString(`"`)
-	}
-
-	if m.Binary {
-		b.WriteString(`,"binary":true`)
-	}
-
-	b.WriteString(`}`)
-
-	return []byte(b.String()), nil
+	return json.Marshal(m)
 }
 
-func escapeJSON(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "\"", "\\\"")
-	s = strings.ReplaceAll(s, "\n", "\\n")
-	s = strings.ReplaceAll(s, "\r", "\\r")
-	s = strings.ReplaceAll(s, "\t", "\\t")
-	return s
+func Unmarshal(data []byte) (*Message, error) {
+	var msg Message
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
+func (m *Message) GetBinaryData() ([]byte, error) {
+	if m.Binary {
+		return []byte(m.Data), nil
+	}
+	return base64.StdEncoding.DecodeString(m.Data)
 }

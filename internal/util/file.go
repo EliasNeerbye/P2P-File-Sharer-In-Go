@@ -9,13 +9,18 @@ import (
 )
 
 func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
-	// Make path absolute
-	absPath, err := filepath.Abs(filepath.Join(baseFolder, dirPath))
-	if err != nil {
-		return nil, err
+	var absPath string
+	var err error
+	
+	if filepath.IsAbs(dirPath) {
+		absPath = dirPath
+	} else {
+		absPath, err = filepath.Abs(filepath.Join(baseFolder, dirPath))
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Check if path is within base folder
 	absBaseFolder, err := filepath.Abs(baseFolder)
 	if err != nil {
 		return nil, err
@@ -25,18 +30,16 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 		return nil, fmt.Errorf("access denied: path is outside the shared folder")
 	}
 
-	// Get file info
 	info, err := os.Stat(absPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// If it's a regular file, just return its name
 	if !info.IsDir() {
-		return []string{info.Name()}, nil
+		_, filename := filepath.Split(absPath)
+		return []string{filename}, nil
 	}
 
-	// Read directory contents
 	entries, err := os.ReadDir(absPath)
 	if err != nil {
 		return nil, err
@@ -46,24 +49,27 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		path := filepath.Join(dirPath, name)
-
-		// Format output
+		
 		if entry.IsDir() {
-			name += "/"
+			files = append(files, name+"/")
+		} else {
+			info, err := entry.Info()
+			if err == nil {
+				size := formatFileSize(info.Size())
+				files = append(files, fmt.Sprintf("%-40s %10s", name, size))
+			} else {
+				files = append(files, name)
+			}
 		}
 
-		// Add file/directory to list
-		files = append(files, name)
-
-		// If recursive and it's a directory, add its contents
 		if recursive && entry.IsDir() {
-			subFiles, err := ListFiles(path, baseFolder, recursive)
+			subDir := filepath.Join(absPath, name)
+			
+			subFiles, err := ListFiles(subDir, baseFolder, recursive)
 			if err != nil {
 				continue
 			}
 
-			// Add path prefix to each file
 			for i, subFile := range subFiles {
 				subFiles[i] = filepath.Join(name, subFile)
 			}
@@ -73,6 +79,17 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 	}
 
 	return files, nil
+}
+
+func formatFileSize(size int64) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	} else if size < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(size)/1024)
+	} else if size < 1024*1024*1024 {
+		return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1f GB", float64(size)/(1024*1024*1024))
 }
 
 func ListFilesRecursive(dirPath string) ([]string, error) {
@@ -100,7 +117,6 @@ func ListFilesRecursive(dirPath string) ([]string, error) {
 func FindMatchingFiles(baseFolder, pattern string) ([]string, error) {
 	var matches []string
 
-	// Split pattern into directory and file parts
 	dir := filepath.Dir(pattern)
 	if dir == "." {
 		dir = ""
@@ -108,38 +124,32 @@ func FindMatchingFiles(baseFolder, pattern string) ([]string, error) {
 
 	filePattern := filepath.Base(pattern)
 
-	// Get full directory path
 	fullDirPath := filepath.Join(baseFolder, dir)
 
-	// Check if directory exists
 	if _, err := os.Stat(fullDirPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("directory not found: %s", dir)
 	}
 
-	// Walk through directory and match files
 	err := filepath.Walk(fullDirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip directories
-		if info.IsDir() {
+		if info.IsDir() && !strings.Contains(filePattern, "*/") {
 			return nil
 		}
 
-		// Get relative path
 		relPath, err := filepath.Rel(baseFolder, path)
 		if err != nil {
 			return err
 		}
 
-		// Check if file matches pattern
 		match, err := filepath.Match(filePattern, filepath.Base(path))
 		if err != nil {
 			return err
 		}
 
-		if match {
+		if match || filePattern == "*" {
 			matches = append(matches, relPath)
 		}
 
@@ -159,4 +169,29 @@ func ParseInt64(s string) (int64, error) {
 
 func ParseFloat64(s string) (float64, error) {
 	return strconv.ParseFloat(s, 64)
+}
+
+func ResolvePath(path, baseDir string) (string, error) {
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve base directory: %v", err)
+	}
+	
+	var absPath string
+	if filepath.IsAbs(path) {
+		absPath = path
+	} else {
+		absPath = filepath.Join(absBase, path)
+	}
+	
+	absPath, err = filepath.Abs(absPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve path: %v", err)
+	}
+	
+	if !strings.HasPrefix(absPath, absBase) {
+		return "", fmt.Errorf("access denied: path is outside the shared folder")
+	}
+	
+	return absPath, nil
 }
