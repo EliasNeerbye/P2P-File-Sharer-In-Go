@@ -33,7 +33,7 @@ type FileTransfer struct {
 	LastProgressTime time.Time
 	AvgSpeed         float64
 	Retries          int
-	AckIDs           map[string]bool // Track message IDs that need acknowledgment
+	AckIDs           map[string]bool
 }
 
 func NewFileTransfer(name string, size int64, transferType string, conn *Connection) *FileTransfer {
@@ -63,17 +63,15 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		if t.AvgSpeed == 0 {
 			t.AvgSpeed = currentSpeed
 		} else {
-			// Weighted average: 70% previous value, 30% new value
+
 			t.AvgSpeed = 0.7*t.AvgSpeed + 0.3*currentSpeed
 		}
 
-		// Use the calculated average speed if provided speed is too low or zero
 		if speed <= 0.01 && t.AvgSpeed > 0 {
 			speed = t.AvgSpeed
 		}
 	}
 
-	// Ensure speed is never displayed as exactly 0.00
 	if speed < 0.01 && bytesTransferred > 0 {
 		speed = 0.01
 	}
@@ -93,7 +91,6 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		remainingBytes := t.TotalSize - t.BytesTransferred
 		remainingSeconds := int(float64(remainingBytes) / (speed * 1024))
 
-		// Only show ETA if we have a reasonable value
 		if remainingSeconds > 0 {
 			if remainingSeconds < 60 {
 				eta = fmt.Sprintf("%ds", remainingSeconds)
@@ -103,12 +100,12 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 				eta = fmt.Sprintf("%dh %dm", remainingSeconds/3600, (remainingSeconds%3600)/60)
 			}
 		} else {
-			eta = "0s" // Almost complete
+			eta = "0s"
 		}
 	} else {
-		// If speed is zero, don't show "calculating..." for small files
+
 		if t.BytesTransferred > 0 && t.BytesTransferred >= t.TotalSize*9/10 {
-			eta = "0s" // Almost complete
+			eta = "0s"
 		} else {
 			eta = "calculating..."
 		}
@@ -120,7 +117,7 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		typeStr = "↑ Sending"
 	}
 
-	fmt.Printf("\r%-70s", " ") // Clear line with wider buffer
+	fmt.Printf("\r%-70s", " ")
 	fmt.Printf("\r%s %s: %s %.1f%% (%.2f KB/s) ETA: %s",
 		typeStr, t.Name, progBar, percentage, speed, eta)
 }
@@ -140,7 +137,6 @@ func (t *FileTransfer) Resume() {
 	}
 }
 
-// WaitForAcknowledgment waits for all registered ACK IDs to be cleared
 func (t *FileTransfer) WaitForAcknowledgment(timeout time.Duration) bool {
 	if len(t.AckIDs) == 0 {
 		return true
@@ -159,12 +155,10 @@ func (t *FileTransfer) WaitForAcknowledgment(timeout time.Duration) bool {
 	return false
 }
 
-// RegisterAckID adds a message ID that needs acknowledgment
 func (t *FileTransfer) RegisterAckID(id string) {
 	t.AckIDs[id] = true
 }
 
-// AcknowledgeID marks a message ID as acknowledged
 func (t *FileTransfer) AcknowledgeID(id string) {
 	delete(t.AckIDs, id)
 }

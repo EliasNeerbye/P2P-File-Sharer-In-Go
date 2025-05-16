@@ -16,12 +16,11 @@ import (
 )
 
 func isPathSafe(requestedPath, baseFolder string) bool {
-	// Don't normalize for the empty path case ("." is always safe)
+
 	if requestedPath == "" || requestedPath == "." {
 		return true
 	}
 
-	// First normalize the path
 	normalizedPath := util.NormalizePath(requestedPath)
 
 	absBase, err := filepath.Abs(baseFolder)
@@ -67,12 +66,11 @@ func NewConnection(conn net.Conn, app *App, isClient bool) *Connection {
 		Name:             app.Config.Name,
 		isClient:         isClient,
 		responseHandlers: make(map[string]func(Message)),
-		ignoreList:       &util.IgnoreList{Patterns: []util.IgnorePattern{}}, // Empty default
+		ignoreList:       &util.IgnoreList{Patterns: []util.IgnorePattern{}},
 	}
 	return c
 }
 
-// loadIgnoreList reloads the .p2pignore file (should be called before each file operation)
 func (c *Connection) loadIgnoreList() *util.IgnoreList {
 	ignoreList, err := util.LoadIgnoreFile(c.App.Config.Folder)
 	if err != nil {
@@ -345,7 +343,6 @@ func (c *Connection) handleCDCommand(cmd *Command) Message {
 
 	c.App.Config.Folder = fullPath
 
-	// Reload ignore list for the new folder
 	ignoreList, _ := util.LoadIgnoreFile(c.App.Config.Folder)
 	if ignoreList != nil {
 		c.ignoreList = ignoreList
@@ -358,20 +355,17 @@ func (c *Connection) handleCDCommand(cmd *Command) Message {
 }
 
 func (c *Connection) handleListCommand(cmd *Command) Message {
-	// Get path or use current directory
+
 	path := "."
 	if len(cmd.Args) > 0 {
 		path = cmd.Args[0]
 	}
 
-	// Add debug output
 	c.Log.Debug("Listing files for path: '%s', base folder: '%s'", path, c.App.Config.Folder)
 
-	// Handle special case for root directory
 	if path == "." || path == "" {
 		c.Log.Debug("Using base folder directly: %s", c.App.Config.Folder)
 
-		// List files directly in the base folder
 		files, err := os.ReadDir(c.App.Config.Folder)
 		if err != nil {
 			return Message{
@@ -380,7 +374,6 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 			}
 		}
 
-		// Reload the ignore file
 		c.loadIgnoreList()
 
 		var resultFiles []string
@@ -389,12 +382,10 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		for _, entry := range files {
 			name := entry.Name()
 
-			// Skip .p2pignore files
 			if name == ".p2pignore" {
 				continue
 			}
 
-			// Check if the file should be ignored
 			if !c.ignoreList.ShouldIgnore(name, entry.IsDir()) {
 				if entry.IsDir() {
 					resultFiles = append(resultFiles, name+"/")
@@ -408,7 +399,6 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 					}
 				}
 
-				// Handle recursive listing
 				if recursive && entry.IsDir() {
 					subpath := filepath.Join(c.App.Config.Folder, name)
 					subfiles, err := util.ListFilesRecursive(subpath)
@@ -422,12 +412,10 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 							continue
 						}
 
-						// Skip .p2pignore files
 						if filepath.Base(subfile) == ".p2pignore" {
 							continue
 						}
 
-						// Check if file should be ignored
 						if !c.ignoreList.ShouldIgnore(relPath, false) {
 							info, err := os.Stat(subfile)
 							if err == nil && !info.IsDir() {
@@ -454,16 +442,13 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		}
 	}
 
-	// For non-root paths, handle differently
 	normalizedPath := util.NormalizePath(path)
 	c.Log.Debug("Normalized path: '%s'", normalizedPath)
 
-	// Build the target path carefully to avoid duplication
 	targetPath := filepath.Join(c.App.Config.Folder, normalizedPath)
 	targetPath = filepath.Clean(targetPath)
 	c.Log.Debug("Target path: '%s'", targetPath)
 
-	// Check if path exists
 	_, err := os.Stat(targetPath)
 	if err != nil {
 		return Message{
@@ -472,7 +457,6 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		}
 	}
 
-	// Check if path is outside shared folder
 	absBase, _ := filepath.Abs(c.App.Config.Folder)
 	absTarget, _ := filepath.Abs(targetPath)
 	if !strings.HasPrefix(absTarget, absBase) {
@@ -482,7 +466,6 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		}
 	}
 
-	// List files using direct directory access instead of ListFiles
 	fileEntries, err := os.ReadDir(targetPath)
 	if err != nil {
 		return Message{
@@ -491,14 +474,12 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		}
 	}
 
-	// Reload the ignore file to get the latest patterns
 	c.loadIgnoreList()
 
 	var filteredFiles []string
 	for _, entry := range fileEntries {
 		name := entry.Name()
 
-		// Skip .p2pignore files
 		if name == ".p2pignore" {
 			continue
 		}
@@ -521,7 +502,6 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		}
 	}
 
-	// Handle recursive listing
 	recursive := cmd.Name == "LSR"
 	if recursive {
 		for _, entry := range fileEntries {
@@ -541,12 +521,10 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 					continue
 				}
 
-				// Skip .p2pignore files
 				if filepath.Base(subfile) == ".p2pignore" {
 					continue
 				}
 
-				// Check if file should be ignored
 				if !c.ignoreList.ShouldIgnore(relPath, false) {
 					info, err := os.Stat(subfile)
 					if err == nil && !info.IsDir() {
@@ -603,7 +581,6 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		}
 	}
 
-	// Normalize the file path
 	filePath := util.NormalizePath(cmd.Args[0])
 
 	if !util.IsValidRelativePath(filePath) {
@@ -627,7 +604,6 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		}
 	}
 
-	// Explicitly prevent transferring .p2pignore files
 	if filepath.Base(filePath) == ".p2pignore" {
 		return Message{
 			Type: MsgTypeError,
@@ -637,10 +613,8 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 	fullPath := filepath.Join(c.App.Config.Folder, filePath)
 
-	// Reload ignore list to get the latest patterns
 	c.loadIgnoreList()
 
-	// Check if file is in ignore list
 	fileInfo, err := os.Stat(fullPath)
 	if err == nil && c.ignoreList.ShouldIgnore(filePath, fileInfo.IsDir()) {
 		return Message{
@@ -708,7 +682,6 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		lastSpeedUpdate := startTime
 		chunksSent := 0
 
-		// Create ACK channel for two-way communication
 		ackChan := make(chan bool, 1)
 		ackID := fmt.Sprintf("ack-%s-%d", filePath, time.Now().UnixNano())
 
@@ -755,7 +728,6 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 			transfer.BytesTransferred = totalSent
 			chunksSent++
 
-			// Update progress every 1MB or 2% progress, whichever comes first
 			progress := (totalSent * 100) / info.Size()
 			currentTime := time.Now()
 			timeForSpeed := currentTime.Sub(lastSpeedUpdate).Seconds()
@@ -767,12 +739,11 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 				var speed float64 = 0
 				if elapsedTime > 0 {
-					// Calculate bytes per second, then convert to KB/s
+
 					speed = float64(totalSent) / elapsedTime / 1024
 
-					// Don't allow extremely low or zero speeds when data has been transferred
 					if totalSent > 0 && (speed < 0.01 || timeForSpeed < 0.1) {
-						speed = 0.01 // Minimum display speed
+						speed = 0.01
 					}
 
 					progMsg := Message{
@@ -787,7 +758,6 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 				}
 			}
 
-			// Throttle very fast transfers slightly to allow progress updates
 			if chunksSent%20 == 0 {
 				time.Sleep(5 * time.Millisecond)
 			}
@@ -806,12 +776,11 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 		transfer.Status = TransferStatusWaitingAck
 
-		// Wait for ACK with a timeout
 		select {
 		case <-ackChan:
 			transfer.Status = TransferStatusComplete
 			c.Log.Success("Transfer completed and acknowledged: %s", filePath)
-		case <-time.After(30 * time.Second): // Increased timeout for larger files
+		case <-time.After(30 * time.Second):
 			transfer.Status = TransferStatusFailed
 			c.Log.Error("Transfer timed out waiting for ACK: %s", filePath)
 		}
@@ -870,7 +839,6 @@ func (c *Connection) handleInfoCommand(_ *Command) Message {
 		info += "Max file size: Unlimited\n"
 	}
 
-	// Add information about ignore patterns
 	if len(c.ignoreList.Patterns) > 0 {
 		info += fmt.Sprintf("\nIgnore patterns (%d):\n", len(c.ignoreList.Patterns))
 		for _, pattern := range c.ignoreList.Patterns {
@@ -896,7 +864,6 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 	}
 
-	// Normalize the directory path
 	dirPath := util.NormalizePath(cmd.Args[0])
 
 	if !util.IsValidRelativePath(dirPath) {
@@ -937,10 +904,8 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 	}
 
-	// Reload ignore patterns before scanning directory
 	c.loadIgnoreList()
 
-	// Get all files in the directory, ignoring those in the ignore list
 	allFiles, err := util.ListFilesRecursive(fullPath)
 	if err != nil {
 		return Message{
@@ -953,9 +918,8 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 	for _, file := range allFiles {
 		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
 		relPath = strings.TrimPrefix(relPath, "/")
-		relPath = strings.TrimPrefix(relPath, "\\") // Also trim backslashes
+		relPath = strings.TrimPrefix(relPath, "\\")
 
-		// Normalize the path to ensure consistency
 		relPath = util.NormalizePath(relPath)
 
 		fileInfo, err := os.Stat(file)
@@ -963,7 +927,6 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 			continue
 		}
 
-		// Explicitly filter out .p2pignore files
 		if filepath.Base(file) == ".p2pignore" {
 			continue
 		}
@@ -973,7 +936,6 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 	}
 
-	// Check if there are any files to transfer
 	if len(files) == 0 {
 		return Message{
 			Type: MsgTypeCommandResult,
@@ -981,13 +943,12 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 	}
 
-	// Only include non-ignored files in the response
 	var includedFilesList []string
 	for _, file := range files {
 		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
 		relPath = strings.TrimPrefix(relPath, "/")
 		relPath = strings.TrimPrefix(relPath, "\\")
-		relPath = util.NormalizePath(relPath) // Normalize
+		relPath = util.NormalizePath(relPath)
 		includedFilesList = append(includedFilesList, relPath)
 	}
 
@@ -1001,7 +962,7 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
 		relPath = strings.TrimPrefix(relPath, "/")
 		relPath = strings.TrimPrefix(relPath, "\\")
-		relPath = util.NormalizePath(relPath) // Normalize
+		relPath = util.NormalizePath(relPath)
 
 		info, err := os.Stat(file)
 		if err != nil || info.IsDir() {
@@ -1014,7 +975,6 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 		c.handleGetCommand(getCmd)
 
-		// Add a slight delay between file transfers
 		time.Sleep(500 * time.Millisecond)
 	}
 
@@ -1032,7 +992,6 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 		}
 	}
 
-	// Normalize the directory path
 	dirPath := util.NormalizePath(cmd.Args[0])
 
 	if !util.IsValidRelativePath(dirPath) {
@@ -1065,11 +1024,9 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 		}
 	}
 
-	// Create a .p2pignore file in this directory if one doesn't exist
-	// This serves as documentation, and the user can customize it later
 	ignoreFilePath := filepath.Join(fullPath, ".p2pignore")
 	if _, err := os.Stat(ignoreFilePath); os.IsNotExist(err) {
-		// Create with default example content
+
 		defaultIgnore := `# P2P File Sharing Ignore File
 # Files and directories matching these patterns will not be shared
 # Examples:
@@ -1077,7 +1034,7 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 # *.log
 # temp/
 `
-		// Don't throw an error if we can't create it - it's just a convenience
+
 		_ = os.WriteFile(ignoreFilePath, []byte(defaultIgnore), 0644)
 	}
 
@@ -1102,10 +1059,8 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 		}
 	}
 
-	// Reload ignore patterns
 	c.loadIgnoreList()
 
-	// Filter out files in the ignore list
 	var filesToSend []string
 	var ignoredFiles []string
 	var notFoundFiles []string
@@ -1119,7 +1074,6 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 			continue
 		}
 
-		// Skip .p2pignore files
 		if filepath.Base(filePath) == ".p2pignore" {
 			ignoredFiles = append(ignoredFiles, filePath+" (.p2pignore files cannot be transferred)")
 			continue
@@ -1152,7 +1106,6 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 		}
 	}
 
-	// If some files were ignored or not found, include this information
 	var resultInfo string
 	if len(notFoundFiles) > 0 || len(ignoredFiles) > 0 {
 		resultInfo = fmt.Sprintf("Sending %d of %d requested files.\n",
@@ -1165,7 +1118,6 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 			resultInfo += "- Files ignored: " + strings.Join(ignoredFiles, ", ") + "\n"
 		}
 
-		// Send this info before starting transfers
 		infoMsg := Message{
 			Type: MsgTypeCommandResult,
 			Data: resultInfo,
@@ -1203,7 +1155,6 @@ func (c *Connection) handlePutMultipleCommand(cmd *Command) Message {
 		}
 	}
 
-	// Validate all paths
 	var validFiles []string
 	var invalidFiles []string
 
@@ -1213,7 +1164,6 @@ func (c *Connection) handlePutMultipleCommand(cmd *Command) Message {
 			continue
 		}
 
-		// Skip .p2pignore files
 		if filepath.Base(file) == ".p2pignore" {
 			invalidFiles = append(invalidFiles, file+" (.p2pignore files cannot be transferred)")
 			continue
@@ -1234,7 +1184,6 @@ func (c *Connection) handlePutMultipleCommand(cmd *Command) Message {
 		}
 	}
 
-	// If some files were invalid, provide feedback
 	if len(invalidFiles) > 0 {
 		return Message{
 			Type: MsgTypeCommandResult,
@@ -1291,9 +1240,8 @@ func (c *Connection) handleStatusCommand(_ *Command) Message {
 	}
 }
 
-// createUniqueFilename creates a unique filename when a file already exists
 func createUniqueFilename(path string) string {
-	// Use the utility function from file.go
+
 	return util.EnsureUniqueFilename(path)
 }
 
@@ -1304,7 +1252,6 @@ func (c *Connection) handleFileStart(msg Message) {
 		return
 	}
 
-	// Normalize the file path to handle backslashes
 	filePath := util.NormalizePath(parts[0])
 
 	if !util.IsValidRelativePath(filePath) {
@@ -1333,7 +1280,6 @@ func (c *Connection) handleFileStart(msg Message) {
 		return
 	}
 
-	// Explicitly prevent receiving .p2pignore files
 	if filepath.Base(filePath) == ".p2pignore" {
 		c.SendError("The .p2pignore file cannot be transferred")
 		return
@@ -1347,7 +1293,6 @@ func (c *Connection) handleFileStart(msg Message) {
 		return
 	}
 
-	// Check if file already exists and create a unique filename
 	if _, err := os.Stat(fullPath); err == nil {
 		newPath := createUniqueFilename(fullPath)
 		c.Log.Info("File already exists, using unique name: %s", filepath.Base(newPath))
@@ -1424,7 +1369,6 @@ func (c *Connection) handleFileData(msg Message) {
 		}
 	}
 
-	// If the message has an ID, send an ACK for it to improve reliability
 	if msg.ID != "" {
 		ackMsg := Message{
 			Type: MsgTypeACK,
@@ -1436,14 +1380,14 @@ func (c *Connection) handleFileData(msg Message) {
 }
 
 func (c *Connection) handleFileEnd(msg Message) {
-	// Normalize the file path
+
 	filePath := util.NormalizePath(msg.Data)
 
 	transfers := c.App.GetTransfers()
 	var transfer *FileTransfer
 
 	for _, t := range transfers {
-		// Compare with normalized paths
+
 		if t.Conn == c && t.Type == TransferTypeReceive &&
 			(t.Name == filePath || util.NormalizePath(t.Name) == filePath) {
 			transfer = t
@@ -1461,7 +1405,6 @@ func (c *Connection) handleFileEnd(msg Message) {
 		transfer.File = nil
 	}
 
-	// Always send the ACK message with the same ID as the request
 	ackMsg := Message{
 		Type: MsgTypeACK,
 		Data: filePath,
@@ -1471,7 +1414,6 @@ func (c *Connection) handleFileEnd(msg Message) {
 		ackMsg.ID = msg.ID
 	}
 
-	// Send multiple ACKs to increase the chance it gets through
 	for i := 0; i < 5; i++ {
 		c.SendReliableMessage(ackMsg)
 		time.Sleep(100 * time.Millisecond)
