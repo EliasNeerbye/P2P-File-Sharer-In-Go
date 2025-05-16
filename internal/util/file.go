@@ -11,7 +11,7 @@ import (
 func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 	var absPath string
 	var err error
-
+	
 	if filepath.IsAbs(dirPath) {
 		absPath = dirPath
 	} else {
@@ -49,7 +49,7 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 
 	for _, entry := range entries {
 		name := entry.Name()
-
+		
 		if entry.IsDir() {
 			files = append(files, name+"/")
 		} else {
@@ -64,7 +64,7 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 
 		if recursive && entry.IsDir() {
 			subDir := filepath.Join(absPath, name)
-
+			
 			subFiles, err := ListFiles(subDir, baseFolder, recursive)
 			if err != nil {
 				continue
@@ -104,46 +104,6 @@ func ListFilesRecursive(dirPath string) ([]string, error) {
 			files = append(files, path)
 		}
 
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return files, nil
-}
-
-func ListFilesRecursiveWithIgnore(dirPath string, baseFolder string, ignoreList *IgnoreList) ([]string, error) {
-	var files []string
-	absBaseFolder, err := filepath.Abs(baseFolder)
-	if err != nil {
-		return nil, err
-	}
-
-	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip directories in the file list
-		if info.IsDir() {
-			return nil
-		}
-
-		// Get relative path from base folder for checking against ignore patterns
-		relPath, err := filepath.Rel(absBaseFolder, path)
-		if err != nil {
-			return err
-		}
-
-		// Skip files matching ignore patterns
-		if ignoreList.ShouldIgnore(relPath) {
-			return nil
-		}
-
-		// Add file to the list
-		files = append(files, relPath)
 		return nil
 	})
 
@@ -216,63 +176,22 @@ func ResolvePath(path, baseDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve base directory: %v", err)
 	}
-
+	
 	var absPath string
 	if filepath.IsAbs(path) {
 		absPath = path
 	} else {
 		absPath = filepath.Join(absBase, path)
 	}
-
+	
 	absPath, err = filepath.Abs(absPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path: %v", err)
 	}
-
+	
 	if !strings.HasPrefix(absPath, absBase) {
 		return "", fmt.Errorf("access denied: path is outside the shared folder")
 	}
-
+	
 	return absPath, nil
-}
-
-// GetFileCompletions returns file and directory completions for the given partial path
-func GetFileCompletions(basePath, partial string) []string {
-	var completions []string
-
-	// Get the directory to look in and the partial filename
-	dir := basePath
-	prefix := partial
-
-	// If the partial path contains a directory separator, split it
-	if strings.Contains(partial, "/") || strings.Contains(partial, "\\") {
-		dir = filepath.Join(basePath, filepath.Dir(partial))
-		prefix = filepath.Base(partial)
-	}
-
-	// Read the directory
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		return completions
-	}
-
-	// Filter files based on the prefix
-	for _, file := range files {
-		name := file.Name()
-		if strings.HasPrefix(name, prefix) {
-			// Add a slash for directories
-			if file.IsDir() {
-				name += "/"
-			}
-
-			// If partial contains path, reconstruct the relative path
-			if strings.Contains(partial, "/") || strings.Contains(partial, "\\") {
-				name = filepath.Join(filepath.Dir(partial), name)
-			}
-
-			completions = append(completions, name)
-		}
-	}
-
-	return completions
 }

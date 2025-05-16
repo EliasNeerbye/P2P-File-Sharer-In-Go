@@ -2,7 +2,6 @@ package network
 
 import (
 	"fmt"
-	"local-file-sharer/internal/util"
 	"os"
 	"time"
 )
@@ -98,21 +97,19 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		typeStr = "↑ Sending"
 	}
 
-	// Clear the current line and print the progress
-	fmt.Printf("\r%-70s", " ")
+	fmt.Printf("\r%-60s", " ")
 	fmt.Printf("\r%s %s: %s %.1f%% (%.2f KB/s) ETA: %s",
 		typeStr, t.Name, progBar, percentage, speed, eta)
 
-	// If transfer just completed, print a completion message with a prompt
 	if percentage >= 100 && t.Status == TransferStatusComplete {
-		fmt.Printf("\n\n%sTransfer complete: %s%s\n\n> ", util.Green+util.Bold, t.Name, util.Reset)
+		fmt.Printf("\nTransfer complete: %s\n> ", t.Name)
 	}
 }
 
 func (t *FileTransfer) Pause() {
 	if t.Status == TransferStatusInProgress {
 		t.Status = TransferStatusPaused
-		fmt.Printf("\n\n%sTransfer paused: %s%s\n\n> ", util.Yellow+util.Bold, t.Name, util.Reset)
+		fmt.Printf("\nTransfer paused: %s\n> ", t.Name)
 	}
 }
 
@@ -120,7 +117,7 @@ func (t *FileTransfer) Resume() {
 	if t.Status == TransferStatusPaused {
 		t.Status = TransferStatusInProgress
 		t.LastProgressTime = time.Now()
-		fmt.Printf("\n\n%sTransfer resumed: %s%s\n\n> ", util.Green+util.Bold, t.Name, util.Reset)
+		fmt.Printf("\nTransfer resumed: %s\n> ", t.Name)
 	}
 }
 
