@@ -223,12 +223,11 @@ func (c *Connection) handleMessage(messageStr string) {
 	case MsgTypeACK:
 		c.handleAck(msg)
 	case MsgTypeError:
-		c.Log.Error("Remote error: %s", msg.Data)
+		fmt.Printf("\n%s[ERROR]%s %s\n\n> ", util.Bold+util.Red, util.Reset, msg.Data)
 	case MsgTypeMessage:
-		fmt.Printf("\n%s[MESSAGE FROM %s]%s %s\n", util.Bold+util.Purple, c.RemoteName, util.Reset, msg.Data)
-		fmt.Print("> ")
+		fmt.Printf("\n%s[MESSAGE FROM %s]%s %s\n\n> ", util.Bold+util.Purple, c.RemoteName, util.Reset, msg.Data)
 	case MsgTypeCommandResult:
-		fmt.Println(msg.Data)
+		fmt.Printf("\n%s\n", msg.Data)
 	default:
 		c.Log.Warn("Unknown message type: %s", msg.Type)
 	}
@@ -918,14 +917,22 @@ func (c *Connection) handleFileEnd(msg Message) {
 		transfer.File = nil
 	}
 
+	transfer.Status = TransferStatusComplete
+	c.Log.Success("File transfer complete: %s", filePath)
+
+	// Send ACK with retry to ensure it reaches the sender
 	ackMsg := Message{
 		Type: MsgTypeACK,
 		Data: filePath,
 	}
-	c.SendReliableMessage(ackMsg)
 
-	transfer.Status = TransferStatusComplete
-	c.Log.Success("File transfer complete: %s", filePath)
+	go func() {
+		// Try sending the ACK multiple times to ensure it reaches the sender
+		for i := 0; i < 5; i++ {
+			c.SendMessage(ackMsg)
+			time.Sleep(500 * time.Millisecond)
+		}
+	}()
 
 	fmt.Printf("\nFile transfer complete: %s\n> ", filePath)
 
@@ -964,7 +971,7 @@ func (c *Connection) handleAck(msg Message) {
 
 	var transfer *FileTransfer
 	for _, t := range c.App.Transfers {
-		if t.Name == filePath && t.Conn == c && t.Status == TransferStatusWaitingAck {
+		if t.Name == filePath && t.Conn == c && (t.Status == TransferStatusWaitingAck || t.Status == TransferStatusComplete) {
 			transfer = t
 			break
 		}
@@ -974,5 +981,6 @@ func (c *Connection) handleAck(msg Message) {
 		transfer.Status = TransferStatusComplete
 		c.Log.Success("File transfer acknowledged: %s", filePath)
 		fmt.Printf("\nFile transfer complete: %s\n> ", filePath)
+		c.App.RemoveTransfer(transfer)
 	}
 }

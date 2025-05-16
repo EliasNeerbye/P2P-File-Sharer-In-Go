@@ -1,8 +1,8 @@
 package network
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"local-file-sharer/internal/util"
 	"os"
 	"os/signal"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 type Command struct {
@@ -51,21 +53,78 @@ func StartCommandInterface(app *App) {
 
 	setupGracefulShutdown(app)
 
-	scanner := bufio.NewScanner(os.Stdin)
+	// Setup raw terminal mode for tab completion
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		log.Error("Failed to set terminal to raw mode: %v", err)
+	} else {
+		defer term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+
+	terminal := term.NewTerminal(os.Stdin, "> ")
+	terminal.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
+		if key != '\t' {
+			return "", 0, false
+		}
+
+		parts := strings.Fields(line[:pos])
+		if len(parts) == 0 {
+			return "", 0, false
+		}
+
+		cmd := strings.ToUpper(parts[0])
+
+		// Only provide completions for certain commands
+		if (cmd == "GET" || cmd == "PUT" || cmd == "CD" || cmd == "LS" || cmd == "GETDIR" || cmd == "PUTDIR") && len(parts) == 2 && key == '\t' {
+			partial := ""
+			if len(parts) > 1 {
+				partial = parts[1]
+			}
+
+			// Get completions
+			var completions []string
+			if cmd == "GET" || cmd == "GETDIR" {
+				// Remote file completions would require server query, not implemented
+				return "", 0, false
+			} else {
+				completions = util.GetFileCompletions(app.Config.Folder, partial)
+			}
+
+			if len(completions) == 1 {
+				// Single completion - replace the current arg
+				newLine := cmd + " " + completions[0]
+				return newLine, len(newLine), true
+			} else if len(completions) > 1 {
+				// Multiple completions - show options
+				fmt.Println()
+				for _, c := range completions {
+					fmt.Println(c)
+				}
+				fmt.Print("> " + line)
+				return "", 0, false
+			}
+		}
+
+		return "", 0, false
+	}
 
 	for app.Ready {
-		fmt.Print("> ")
-		if !scanner.Scan() {
+		line, err := terminal.ReadLine()
+		if err != nil {
+			if err != io.EOF {
+				log.Error("Failed to read input: %v", err)
+			}
 			break
 		}
 
-		input := strings.TrimSpace(scanner.Text())
+		input := strings.TrimSpace(line)
 		if input == "" {
 			continue
 		}
 
 		if err := parser.Execute(input); err != nil {
 			log.Error("Command failed: %v", err)
+			fmt.Print("> ")
 		}
 	}
 }
@@ -112,6 +171,7 @@ func (p *CommandParser) Execute(input string) error {
 		"PAUSE":  true,
 		"RESUME": true,
 		"CANCEL": true,
+		"CLEAR":  true,
 	}
 
 	if !allowedDuringTransfer[cmdName] && p.App.IsActiveTransferInProgress() {
@@ -159,8 +219,14 @@ func (p *CommandParser) Execute(input string) error {
 		err = p.handleResumeTransfer(args)
 	case "CANCEL":
 		err = p.handleCancelTransfer(args)
+	case "CLEAR":
+		err = p.handleClear()
 	default:
 		return fmt.Errorf("unknown command: %s", cmdName)
+	}
+
+	if err == nil {
+		fmt.Print("> ")
 	}
 
 	return err
@@ -279,6 +345,12 @@ func (p *CommandParser) handleQuit() error {
 	return nil
 }
 
+func (p *CommandParser) handleClear() error {
+	// ANSI escape sequence to clear screen and move cursor to top-left
+	fmt.Print("\033[H\033[2J")
+	return nil
+}
+
 func (p *CommandParser) handleHelp() error {
 	help := `
 Available Commands:
@@ -287,6 +359,7 @@ Available Commands:
     CD <path>          - Change local directory
     PWD                - Show current working directory
     INFO               - Show information about this node
+    CLEAR              - Clear the terminal screen
     HELP               - Show this help message
     QUIT, EXIT         - Exit the application
 
@@ -306,6 +379,8 @@ Available Commands:
     PAUSE <id>         - Pause a file transfer
     RESUME <id>        - Resume a paused transfer
     CANCEL <id>        - Cancel an active transfer
+
+Note: Tab completion is available for local file paths.
 `
 	fmt.Println(help)
 	return nil
