@@ -265,12 +265,12 @@ func (c *Connection) handleCommand(msg Message) {
 		return
 	}
 
-	c.Log.Debug("Received command: %s", cmd.Name)
+	c.Log.Debug("Received command: %s %v", cmd.Name, cmd.Args)
 
 	var response Message
 
 	switch cmd.Name {
-	case "LS", "LIST":
+	case "LS", "LIST", "LSR":
 		response = c.handleListCommand(cmd)
 	case "CDR":
 		response = c.handleCDCommand(cmd)
@@ -358,39 +358,132 @@ func (c *Connection) handleCDCommand(cmd *Command) Message {
 }
 
 func (c *Connection) handleListCommand(cmd *Command) Message {
+	// Get path or use current directory
 	path := "."
 	if len(cmd.Args) > 0 {
 		path = cmd.Args[0]
 	}
 
-	// Check for path safety without joining to base folder yet
-	if path != "." && !isPathSafe(path, c.App.Config.Folder) {
+	// Add debug output
+	c.Log.Debug("Listing files for path: '%s', base folder: '%s'", path, c.App.Config.Folder)
+
+	// Handle special case for root directory
+	if path == "." || path == "" {
+		c.Log.Debug("Using base folder directly: %s", c.App.Config.Folder)
+
+		// List files directly in the base folder
+		files, err := os.ReadDir(c.App.Config.Folder)
+		if err != nil {
+			return Message{
+				Type: MsgTypeError,
+				Data: fmt.Sprintf("Failed to list base directory: %v", err),
+			}
+		}
+
+		// Reload the ignore file
+		c.loadIgnoreList()
+
+		var resultFiles []string
+		recursive := cmd.Name == "LSR"
+
+		for _, entry := range files {
+			name := entry.Name()
+
+			// Skip .p2pignore files
+			if name == ".p2pignore" {
+				continue
+			}
+
+			// Check if the file should be ignored
+			if !c.ignoreList.ShouldIgnore(name, entry.IsDir()) {
+				if entry.IsDir() {
+					resultFiles = append(resultFiles, name+"/")
+				} else {
+					info, err := entry.Info()
+					if err == nil {
+						size := util.FormatFileSize(info.Size())
+						resultFiles = append(resultFiles, fmt.Sprintf("%-40s %10s", name, size))
+					} else {
+						resultFiles = append(resultFiles, name)
+					}
+				}
+
+				// Handle recursive listing
+				if recursive && entry.IsDir() {
+					subpath := filepath.Join(c.App.Config.Folder, name)
+					subfiles, err := util.ListFilesRecursive(subpath)
+					if err != nil {
+						continue
+					}
+
+					for _, subfile := range subfiles {
+						relPath, err := filepath.Rel(c.App.Config.Folder, subfile)
+						if err != nil {
+							continue
+						}
+
+						// Skip .p2pignore files
+						if filepath.Base(subfile) == ".p2pignore" {
+							continue
+						}
+
+						// Check if file should be ignored
+						if !c.ignoreList.ShouldIgnore(relPath, false) {
+							info, err := os.Stat(subfile)
+							if err == nil && !info.IsDir() {
+								size := util.FormatFileSize(info.Size())
+								resultFiles = append(resultFiles, fmt.Sprintf("%-40s %10s", relPath, size))
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if len(resultFiles) == 0 {
+			return Message{
+				Type: MsgTypeCommandResult,
+				Data: "Contents of .: (empty or all files are ignored)",
+			}
+		}
+
+		result := fmt.Sprintf("Contents of .:\n%s", strings.Join(resultFiles, "\n"))
 		return Message{
-			Type: MsgTypeError,
-			Data: fmt.Sprintf("Access denied: path %s is outside the shared folder", path),
+			Type: MsgTypeCommandResult,
+			Data: result,
 		}
 	}
 
-	recursive := cmd.Name == "LSR"
+	// For non-root paths, handle differently
+	normalizedPath := util.NormalizePath(path)
+	c.Log.Debug("Normalized path: '%s'", normalizedPath)
 
-	var fullPath string
-	if path == "." {
-		fullPath = c.App.Config.Folder
-	} else {
-		// Use filepath.Clean to avoid duplicated segments
-		normalized := util.NormalizePath(path)
-		fullPath = filepath.Clean(filepath.Join(c.App.Config.Folder, normalized))
-	}
+	// Build the target path carefully to avoid duplication
+	targetPath := filepath.Join(c.App.Config.Folder, normalizedPath)
+	targetPath = filepath.Clean(targetPath)
+	c.Log.Debug("Target path: '%s'", targetPath)
 
-	absPath, err := filepath.Abs(fullPath)
+	// Check if path exists
+	_, err := os.Stat(targetPath)
 	if err != nil {
 		return Message{
 			Type: MsgTypeError,
-			Data: fmt.Sprintf("Failed to resolve path: %v", err),
+			Data: fmt.Sprintf("Path not found: %v", err),
 		}
 	}
 
-	files, err := util.ListFiles(absPath, c.App.Config.Folder, recursive)
+	// Check if path is outside shared folder
+	absBase, _ := filepath.Abs(c.App.Config.Folder)
+	absTarget, _ := filepath.Abs(targetPath)
+	if !strings.HasPrefix(absTarget, absBase) {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Access denied: path is outside the shared folder",
+		}
+	}
+
+	// List files using direct directory access instead of ListFiles
+	fileEntries, err := os.ReadDir(targetPath)
 	if err != nil {
 		return Message{
 			Type: MsgTypeError,
@@ -401,47 +494,80 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 	// Reload the ignore file to get the latest patterns
 	c.loadIgnoreList()
 
-	// Filter out ignored files
 	var filteredFiles []string
-	for _, file := range files {
-		// Skip hidden files and directories that begin with .
-		// Extract just the filename without the size part
-		fileName := file
-		if idx := strings.Index(file, " "); idx > 0 {
-			fileName = file[:idx]
-		}
+	for _, entry := range fileEntries {
+		name := entry.Name()
 
-		filePath := fileName
-		if path != "." {
-			filePath = filepath.Join(path, fileName)
-		}
-		isDir := strings.HasSuffix(fileName, "/")
-
-		// Always exclude .p2pignore files
-		if fileName == ".p2pignore" {
+		// Skip .p2pignore files
+		if name == ".p2pignore" {
 			continue
 		}
 
-		if !c.ignoreList.ShouldIgnore(filePath, isDir) {
-			filteredFiles = append(filteredFiles, file)
+		relativePath := filepath.Join(normalizedPath, name)
+		isDir := entry.IsDir()
+
+		if !c.ignoreList.ShouldIgnore(relativePath, isDir) {
+			if isDir {
+				filteredFiles = append(filteredFiles, name+"/")
+			} else {
+				info, err := entry.Info()
+				if err == nil {
+					size := util.FormatFileSize(info.Size())
+					filteredFiles = append(filteredFiles, fmt.Sprintf("%-40s %10s", name, size))
+				} else {
+					filteredFiles = append(filteredFiles, name)
+				}
+			}
 		}
 	}
 
-	relPath, _ := filepath.Rel(c.App.Config.Folder, absPath)
-	if relPath == "" {
-		relPath = "."
+	// Handle recursive listing
+	recursive := cmd.Name == "LSR"
+	if recursive {
+		for _, entry := range fileEntries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			subpath := filepath.Join(targetPath, entry.Name())
+			subfiles, err := util.ListFilesRecursive(subpath)
+			if err != nil {
+				continue
+			}
+
+			for _, subfile := range subfiles {
+				relPath, err := filepath.Rel(c.App.Config.Folder, subfile)
+				if err != nil {
+					continue
+				}
+
+				// Skip .p2pignore files
+				if filepath.Base(subfile) == ".p2pignore" {
+					continue
+				}
+
+				// Check if file should be ignored
+				if !c.ignoreList.ShouldIgnore(relPath, false) {
+					info, err := os.Stat(subfile)
+					if err == nil && !info.IsDir() {
+						subRelPath, _ := filepath.Rel(targetPath, subfile)
+						size := util.FormatFileSize(info.Size())
+						filteredFiles = append(filteredFiles, fmt.Sprintf("%-40s %10s", subRelPath, size))
+					}
+				}
+			}
+		}
 	}
 
 	if len(filteredFiles) == 0 {
-		result := fmt.Sprintf("Contents of %s: (empty or all files are ignored)", relPath)
+		result := fmt.Sprintf("Contents of %s: (empty or all files are ignored)", normalizedPath)
 		return Message{
 			Type: MsgTypeCommandResult,
 			Data: result,
 		}
 	}
 
-	result := fmt.Sprintf("Contents of %s:\n%s", relPath, strings.Join(filteredFiles, "\n"))
-
+	result := fmt.Sprintf("Contents of %s:\n%s", normalizedPath, strings.Join(filteredFiles, "\n"))
 	return Message{
 		Type: MsgTypeCommandResult,
 		Data: result,

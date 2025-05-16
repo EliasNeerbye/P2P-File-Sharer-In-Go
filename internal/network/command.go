@@ -167,28 +167,76 @@ func (p *CommandParser) handleLS(args []string) error {
 		path = args[0]
 	}
 
-	resolvedPath, err := util.ResolvePath(path, p.App.Config.Folder)
-	if err != nil {
-		return err
+	// Special handling for root directory
+	if path == "." || path == "" {
+		// Use the folder directly
+		entries, err := os.ReadDir(p.App.Config.Folder)
+		if err != nil {
+			return fmt.Errorf("failed to list directory: %v", err)
+		}
+
+		fmt.Printf("Contents of .:\n")
+		for _, entry := range entries {
+			if entry.IsDir() {
+				fmt.Printf("%s/\n", entry.Name())
+			} else {
+				info, err := entry.Info()
+				if err == nil {
+					size := util.FormatFileSize(info.Size())
+					fmt.Printf("%-40s %10s\n", entry.Name(), size)
+				} else {
+					fmt.Println(entry.Name())
+				}
+			}
+		}
+		return nil
 	}
 
-	files, err := util.ListFiles(resolvedPath, p.App.Config.Folder, false)
+	// For non-root paths
+	normalizedPath := util.NormalizePath(path)
+	resolvedPath, err := filepath.Abs(filepath.Join(p.App.Config.Folder, normalizedPath))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve path: %v", err)
 	}
 
-	relPath, err := filepath.Rel(p.App.Config.Folder, resolvedPath)
-	if err != nil {
-		relPath = path
-	}
-	if relPath == "" {
-		relPath = "."
+	// Security check
+	absBase, _ := filepath.Abs(p.App.Config.Folder)
+	if !strings.HasPrefix(resolvedPath, absBase) {
+		return fmt.Errorf("access denied: path is outside the shared folder")
 	}
 
-	fmt.Printf("Contents of %s:\n", relPath)
-	for _, file := range files {
-		fmt.Println(file)
+	// Check if directory exists
+	info, err := os.Stat(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("failed to access directory: %v", err)
 	}
+
+	if !info.IsDir() {
+		fmt.Printf("%s: %s\n", path, util.FormatFileSize(info.Size()))
+		return nil
+	}
+
+	// List directory contents
+	entries, err := os.ReadDir(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("failed to list directory: %v", err)
+	}
+
+	fmt.Printf("Contents of %s:\n", normalizedPath)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			fmt.Printf("%s/\n", entry.Name())
+		} else {
+			info, err := entry.Info()
+			if err == nil {
+				size := util.FormatFileSize(info.Size())
+				fmt.Printf("%-40s %10s\n", entry.Name(), size)
+			} else {
+				fmt.Println(entry.Name())
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -225,9 +273,22 @@ func (p *CommandParser) handleCD(args []string) error {
 		return nil
 	}
 
-	resolvedPath, err := util.ResolvePath(path, p.App.Config.Folder)
+	// Special handling for "."
+	if path == "." {
+		return nil // No change needed
+	}
+
+	// For other paths
+	normalizedPath := util.NormalizePath(path)
+	resolvedPath, err := filepath.Abs(filepath.Join(p.App.Config.Folder, normalizedPath))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve path: %v", err)
+	}
+
+	// Security check
+	absBase, _ := filepath.Abs(p.App.Config.Folder)
+	if !strings.HasPrefix(resolvedPath, absBase) {
+		return fmt.Errorf("access denied: path is outside the shared folder")
 	}
 
 	info, err := os.Stat(resolvedPath)
@@ -356,9 +417,24 @@ func (p *CommandParser) handlePut(args []string) error {
 
 	filePath := args[0]
 
-	resolvedPath, err := util.ResolvePath(filePath, p.App.Config.Folder)
+	// Handle root directory case
+	if filePath == "." {
+		return fmt.Errorf("cannot PUT the entire directory, use PUTDIR instead")
+	}
+
+	// Normalize path
+	normalizedPath := util.NormalizePath(filePath)
+
+	// Resolve the path carefully
+	resolvedPath, err := filepath.Abs(filepath.Join(p.App.Config.Folder, normalizedPath))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve path: %v", err)
+	}
+
+	// Security check
+	absBase, _ := filepath.Abs(p.App.Config.Folder)
+	if !strings.HasPrefix(resolvedPath, absBase) {
+		return fmt.Errorf("access denied: path is outside the shared folder")
 	}
 
 	fileInfo, err := os.Stat(resolvedPath)
@@ -374,6 +450,9 @@ func (p *CommandParser) handlePut(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get relative path: %v", err)
 	}
+
+	// Normalize the relative path for remote system
+	relPath = util.NormalizePath(relPath)
 
 	result, err := p.executeRemoteCommand("PUT", relPath)
 	if err != nil {
@@ -417,9 +496,41 @@ func (p *CommandParser) handlePutDir(args []string) error {
 		path = args[0]
 	}
 
-	resolvedPath, err := util.ResolvePath(path, p.App.Config.Folder)
+	// Handle special case for root directory
+	if path == "." {
+		result, err := p.executeRemoteCommand("PUTDIR", ".")
+		if err != nil {
+			return err
+		}
+
+		if strings.Contains(result, "Ready to receive") {
+			conn := p.getFirstConnection()
+			if conn == nil {
+				return fmt.Errorf("no active connection")
+			}
+
+			cmd := &Command{
+				Name: "GETDIR",
+				Args: []string{"."},
+			}
+
+			conn.handleGetDirCommand(cmd)
+		}
+
+		return nil
+	}
+
+	// For non-root paths
+	normalizedPath := util.NormalizePath(path)
+	resolvedPath, err := filepath.Abs(filepath.Join(p.App.Config.Folder, normalizedPath))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve path: %v", err)
+	}
+
+	// Security check
+	absBase, _ := filepath.Abs(p.App.Config.Folder)
+	if !strings.HasPrefix(resolvedPath, absBase) {
+		return fmt.Errorf("access denied: path is outside the shared folder")
 	}
 
 	info, err := os.Stat(resolvedPath)
@@ -435,6 +546,9 @@ func (p *CommandParser) handlePutDir(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get relative path: %v", err)
 	}
+
+	// Normalize the relative path for remote system
+	relPath = util.NormalizePath(relPath)
 
 	result, err := p.executeRemoteCommand("PUTDIR", relPath)
 	if err != nil {
@@ -500,9 +614,20 @@ func (p *CommandParser) handlePutMultiple(args []string) error {
 	}
 
 	for _, filePath := range args {
-		resolvedPath, err := util.ResolvePath(filePath, p.App.Config.Folder)
+		// Normalize path
+		normalizedPath := util.NormalizePath(filePath)
+
+		// Resolve path carefully
+		resolvedPath, err := filepath.Abs(filepath.Join(p.App.Config.Folder, normalizedPath))
 		if err != nil {
 			fmt.Printf("Failed to resolve path for %s: %v\n", filePath, err)
+			continue
+		}
+
+		// Security check
+		absBase, _ := filepath.Abs(p.App.Config.Folder)
+		if !strings.HasPrefix(resolvedPath, absBase) {
+			fmt.Printf("Access denied: %s is outside the shared folder\n", filePath)
 			continue
 		}
 
@@ -522,6 +647,9 @@ func (p *CommandParser) handlePutMultiple(args []string) error {
 			fmt.Printf("Failed to get relative path for %s: %v\n", filePath, err)
 			continue
 		}
+
+		// Normalize the relative path for remote system
+		relPath = util.NormalizePath(relPath)
 
 		result, err := p.executeRemoteCommand("PUT", relPath)
 		if err != nil {

@@ -98,6 +98,11 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 }
 
 func formatFileSize(size int64) string {
+	return FormatFileSize(size)
+}
+
+// FormatFileSize formats a file size in bytes to a human-readable string
+func FormatFileSize(size int64) string {
 	if size < 1024 {
 		return fmt.Sprintf("%d B", size)
 	} else if size < 1024*1024 {
@@ -194,6 +199,11 @@ func ParseFloat64(s string) (float64, error) {
 }
 
 func ResolvePath(path, baseDir string) (string, error) {
+	// Handle "." specially as it represents the current directory
+	if path == "." || path == "" {
+		return baseDir, nil
+	}
+
 	// Normalize the input path
 	normalizedPath := NormalizePath(path)
 
@@ -202,13 +212,22 @@ func ResolvePath(path, baseDir string) (string, error) {
 		return "", fmt.Errorf("failed to resolve base directory: %v", err)
 	}
 
+	// Handle paths more reliably
 	var absPath string
 	if filepath.IsAbs(normalizedPath) {
 		absPath = normalizedPath
 	} else {
-		absPath = filepath.Join(absBase, normalizedPath)
+		// Direct join instead of filepath.Join to prevent path issues
+		if strings.HasSuffix(absBase, "/") || strings.HasSuffix(absBase, "\\") {
+			absPath = absBase + normalizedPath
+		} else {
+			absPath = absBase + string(filepath.Separator) + normalizedPath
+		}
 	}
 
+	absPath = filepath.Clean(absPath)
+
+	// Check if the resolved path is within the base directory
 	absPath, err = filepath.Abs(absPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path: %v", err)
