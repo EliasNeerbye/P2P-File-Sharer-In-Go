@@ -133,13 +133,16 @@ func (c *Connection) Close() {
 	c.App.RemoveConnection(c)
 	c.Log.Info("Connection closed")
 
-	if c.isClient && !c.App.Config.DualMode {
+	if c.isClient {
 		c.Log.Error("Lost connection to server, exiting...")
 		fmt.Println("\nDisconnected from server. Press Enter to exit.")
 
 		time.Sleep(500 * time.Millisecond)
 
 		os.Exit(1)
+	} else {
+		fmt.Println("\nClient disconnected. Waiting for new connections...")
+		fmt.Print("> ")
 	}
 }
 
@@ -159,7 +162,7 @@ func (c *Connection) SendMessage(msg Message) error {
 	if err != nil {
 		c.Log.Error("Failed to send message: %v", err)
 
-		if c.isClient && !c.App.Config.DualMode {
+		if c.isClient {
 			c.Close()
 		}
 
@@ -223,6 +226,7 @@ func (c *Connection) handleMessage(messageStr string) {
 		c.Log.Error("Remote error: %s", msg.Data)
 	case MsgTypeMessage:
 		fmt.Printf("\n%s[MESSAGE FROM %s]%s %s\n", util.Bold+util.Purple, c.RemoteName, util.Reset, msg.Data)
+		fmt.Print("> ")
 	case MsgTypeCommandResult:
 		fmt.Println(msg.Data)
 	default:
@@ -642,33 +646,17 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 	}
 
-	dirMsg := Message{
-		Type: MsgTypeCommandResult,
-		Data: strings.Join(files, "\n"),
-	}
-	c.SendMessage(dirMsg)
-
+	fileList := make([]string, 0, len(files))
 	for _, file := range files {
-		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
-		relPath = strings.TrimPrefix(relPath, "/")
-
-		info, err := os.Stat(file)
-		if err != nil || info.IsDir() {
-			continue
+		relPath, err := filepath.Rel(c.App.Config.Folder, file)
+		if err == nil {
+			fileList = append(fileList, relPath)
 		}
-
-		getCmd := &Command{
-			Name: "GET",
-			Args: []string{relPath},
-		}
-		c.handleGetCommand(getCmd)
-
-		time.Sleep(100 * time.Millisecond)
 	}
 
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: fmt.Sprintf("Sending directory: %s", dirPath),
+		Data: strings.Join(fileList, "\n"),
 	}
 }
 
@@ -711,60 +699,47 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 }
 
 func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
-	if len(cmd.Args) < 1 {
+	if len(cmd.Args) == 0 {
 		return Message{
 			Type: MsgTypeError,
-			Data: "GETM requires a file pattern",
+			Data: "GETM requires at least one file",
 		}
 	}
 
-	pattern := cmd.Args[0]
+	filePaths := cmd.Args
+	var matchedFiles []string
 
-	if c.App.Config.ReadOnly {
+	for _, path := range filePaths {
+		if strings.Contains(path, "*") || strings.Contains(path, "?") {
+			matches, err := util.FindMatchingFiles(c.App.Config.Folder, path)
+			if err != nil {
+				return Message{
+					Type: MsgTypeError,
+					Data: fmt.Sprintf("Failed to find matching files: %v", err),
+				}
+			}
+
+			if len(matches) > 0 {
+				matchedFiles = append(matchedFiles, matches...)
+			}
+		} else {
+			fullPath := filepath.Join(c.App.Config.Folder, path)
+			if _, err := os.Stat(fullPath); err == nil {
+				matchedFiles = append(matchedFiles, path)
+			}
+		}
+	}
+
+	if len(matchedFiles) == 0 {
 		return Message{
 			Type: MsgTypeError,
-			Data: "This node is in read-only mode and cannot send files",
+			Data: "No files match the specified patterns or names",
 		}
-	}
-
-	matches, err := util.FindMatchingFiles(c.App.Config.Folder, pattern)
-	if err != nil {
-		return Message{
-			Type: MsgTypeError,
-			Data: fmt.Sprintf("Failed to find matching files: %v", err),
-		}
-	}
-
-	if len(matches) == 0 {
-		return Message{
-			Type: MsgTypeError,
-			Data: "No files match the pattern",
-		}
-	}
-
-	listMsg := Message{
-		Type: MsgTypeCommandResult,
-		Data: fmt.Sprintf("Found %d files matching pattern %s:\n%s",
-			len(matches), pattern, strings.Join(matches, "\n")),
-	}
-	c.SendMessage(listMsg)
-
-	for _, file := range matches {
-		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
-		relPath = strings.TrimPrefix(relPath, "/")
-
-		getCmd := &Command{
-			Name: "GET",
-			Args: []string{relPath},
-		}
-		c.handleGetCommand(getCmd)
-
-		time.Sleep(100 * time.Millisecond)
 	}
 
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: fmt.Sprintf("Sending %d files matching pattern: %s", len(matches), pattern),
+		Data: strings.Join(matchedFiles, "\n"),
 	}
 }
 
@@ -952,6 +927,8 @@ func (c *Connection) handleFileEnd(msg Message) {
 	transfer.Status = TransferStatusComplete
 	c.Log.Success("File transfer complete: %s", filePath)
 
+	fmt.Printf("\nFile transfer complete: %s\n> ", filePath)
+
 	c.App.RemoveTransfer(transfer)
 }
 
@@ -996,5 +973,6 @@ func (c *Connection) handleAck(msg Message) {
 	if transfer != nil {
 		transfer.Status = TransferStatusComplete
 		c.Log.Success("File transfer acknowledged: %s", filePath)
+		fmt.Printf("\nFile transfer complete: %s\n> ", filePath)
 	}
 }
