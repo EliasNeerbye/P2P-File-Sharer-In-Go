@@ -63,9 +63,19 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		if t.AvgSpeed == 0 {
 			t.AvgSpeed = currentSpeed
 		} else {
+			// Weighted average: 70% previous value, 30% new value
 			t.AvgSpeed = 0.7*t.AvgSpeed + 0.3*currentSpeed
 		}
-		speed = t.AvgSpeed
+
+		// Use the calculated average speed if provided speed is too low or zero
+		if speed <= 0.01 && t.AvgSpeed > 0 {
+			speed = t.AvgSpeed
+		}
+	}
+
+	// Ensure speed is never displayed as exactly 0.00
+	if speed < 0.01 && bytesTransferred > 0 {
+		speed = 0.01
 	}
 
 	t.BytesTransferred = bytesTransferred
@@ -82,15 +92,26 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 	if speed > 0 {
 		remainingBytes := t.TotalSize - t.BytesTransferred
 		remainingSeconds := int(float64(remainingBytes) / (speed * 1024))
-		if remainingSeconds < 60 {
-			eta = fmt.Sprintf("%ds", remainingSeconds)
-		} else if remainingSeconds < 3600 {
-			eta = fmt.Sprintf("%dm %ds", remainingSeconds/60, remainingSeconds%60)
+
+		// Only show ETA if we have a reasonable value
+		if remainingSeconds > 0 {
+			if remainingSeconds < 60 {
+				eta = fmt.Sprintf("%ds", remainingSeconds)
+			} else if remainingSeconds < 3600 {
+				eta = fmt.Sprintf("%dm %ds", remainingSeconds/60, remainingSeconds%60)
+			} else {
+				eta = fmt.Sprintf("%dh %dm", remainingSeconds/3600, (remainingSeconds%3600)/60)
+			}
 		} else {
-			eta = fmt.Sprintf("%dh %dm", remainingSeconds/3600, (remainingSeconds%3600)/60)
+			eta = "0s" // Almost complete
 		}
 	} else {
-		eta = "calculating..."
+		// If speed is zero, don't show "calculating..." for small files
+		if t.BytesTransferred > 0 && t.BytesTransferred >= t.TotalSize*9/10 {
+			eta = "0s" // Almost complete
+		} else {
+			eta = "calculating..."
+		}
 	}
 
 	progBar := generateProgressBar(percentage, 30)
@@ -99,7 +120,7 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		typeStr = "↑ Sending"
 	}
 
-	fmt.Printf("\r%-50s", " ")
+	fmt.Printf("\r%-70s", " ") // Clear line with wider buffer
 	fmt.Printf("\r%s %s: %s %.1f%% (%.2f KB/s) ETA: %s",
 		typeStr, t.Name, progBar, percentage, speed, eta)
 }

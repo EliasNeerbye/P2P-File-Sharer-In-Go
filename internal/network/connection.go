@@ -452,6 +452,14 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		}
 	}
 
+	// Explicitly prevent transferring .p2pignore files
+	if filepath.Base(filePath) == ".p2pignore" {
+		return Message{
+			Type: MsgTypeError,
+			Data: "The .p2pignore file cannot be transferred",
+		}
+	}
+
 	fullPath := filepath.Join(c.App.Config.Folder, filePath)
 
 	// Check if file is in ignore list
@@ -519,6 +527,7 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		lastProgress := int64(0)
 		lastProgressBytes := int64(0)
 		startTime := time.Now()
+		lastSpeedUpdate := startTime
 		chunksSent := 0
 
 		// Create ACK channel for two-way communication
@@ -568,13 +577,25 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 			transfer.BytesTransferred = totalSent
 			chunksSent++
 
+			// Update progress every 1MB or 2% progress, whichever comes first
 			progress := (totalSent * 100) / info.Size()
-			if totalSent-lastProgressBytes > 1048576 || progress > lastProgress+2 {
+			currentTime := time.Now()
+			timeForSpeed := currentTime.Sub(lastSpeedUpdate).Seconds()
+
+			if totalSent-lastProgressBytes > 1048576 || progress > lastProgress+2 || timeForSpeed > 1.0 {
 				lastProgress = progress
 				lastProgressBytes = totalSent
-				elapsedTime := time.Since(startTime).Seconds()
+				elapsedTime := currentTime.Sub(startTime).Seconds()
+
+				var speed float64 = 0
 				if elapsedTime > 0 {
-					speed := float64(totalSent) / elapsedTime / 1024
+					// Calculate bytes per second, then convert to KB/s
+					speed = float64(totalSent) / elapsedTime / 1024
+
+					// Don't allow extremely low or zero speeds when data has been transferred
+					if totalSent > 0 && (speed < 0.01 || timeForSpeed < 0.1) {
+						speed = 0.01 // Minimum display speed
+					}
 
 					progMsg := Message{
 						Type: MsgTypeProgress,
@@ -584,9 +605,11 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 					c.SendMessage(progMsg)
 
 					transfer.UpdateProgress(totalSent, speed)
+					lastSpeedUpdate = currentTime
 				}
 			}
 
+			// Throttle very fast transfers slightly to allow progress updates
 			if chunksSent%20 == 0 {
 				time.Sleep(5 * time.Millisecond)
 			}
@@ -747,14 +770,27 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 			continue
 		}
 
+		// Explicitly filter out .p2pignore files
+		if filepath.Base(file) == ".p2pignore" {
+			continue
+		}
+
 		if !c.ignoreList.ShouldIgnore(relPath, false) {
 			files = append(files, file)
 		}
 	}
 
+	// Only include non-ignored files in the response
+	var includedFilesList []string
+	for _, file := range files {
+		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
+		relPath = strings.TrimPrefix(relPath, "/")
+		includedFilesList = append(includedFilesList, relPath)
+	}
+
 	dirMsg := Message{
 		Type: MsgTypeCommandResult,
-		Data: strings.Join(files, "\n"),
+		Data: strings.Join(includedFilesList, "\n"),
 	}
 	c.SendMessage(dirMsg)
 

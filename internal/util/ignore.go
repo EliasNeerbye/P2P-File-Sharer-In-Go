@@ -14,6 +14,7 @@ type IgnorePattern struct {
 
 type IgnoreList struct {
 	Patterns []IgnorePattern
+	RawLines []string // Keep original pattern strings for debugging
 }
 
 func LoadIgnoreFile(baseFolder string) (*IgnoreList, error) {
@@ -22,7 +23,10 @@ func LoadIgnoreFile(baseFolder string) (*IgnoreList, error) {
 	// Check if the ignore file exists
 	if _, err := os.Stat(ignoreFile); os.IsNotExist(err) {
 		// No ignore file, create an empty ignore list
-		return &IgnoreList{Patterns: []IgnorePattern{}}, nil
+		return &IgnoreList{
+			Patterns: []IgnorePattern{},
+			RawLines: []string{},
+		}, nil
 	}
 
 	file, err := os.Open(ignoreFile)
@@ -33,6 +37,7 @@ func LoadIgnoreFile(baseFolder string) (*IgnoreList, error) {
 
 	ignoreList := &IgnoreList{
 		Patterns: []IgnorePattern{},
+		RawLines: []string{},
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -43,6 +48,9 @@ func LoadIgnoreFile(baseFolder string) (*IgnoreList, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+
+		// Store original pattern for reference
+		ignoreList.RawLines = append(ignoreList.RawLines, line)
 
 		// Check if it's a directory pattern (ends with /)
 		isDir := strings.HasSuffix(line, "/")
@@ -60,13 +68,26 @@ func LoadIgnoreFile(baseFolder string) (*IgnoreList, error) {
 }
 
 func (il *IgnoreList) ShouldIgnore(path string, isDir bool) bool {
-	if il == nil || len(il.Patterns) == 0 {
+	if il == nil {
 		return false
 	}
 
 	// Always ignore the .p2pignore file itself
-	if filepath.Base(path) == ".p2pignore" {
+	filename := filepath.Base(path)
+	if filename == ".p2pignore" {
 		return true
+	}
+
+	if len(il.Patterns) == 0 {
+		return false
+	}
+
+	// For exact filename matching (handles the case in the example)
+	for _, pattern := range il.Patterns {
+		// Check if the pattern exactly matches the filename
+		if pattern.Pattern == filename {
+			return true
+		}
 	}
 
 	normalizedPath := filepath.ToSlash(path)
@@ -76,19 +97,26 @@ func (il *IgnoreList) ShouldIgnore(path string, isDir bool) bool {
 			continue
 		}
 
-		// Direct match
+		// Direct match with full path
 		if pattern.Pattern == normalizedPath {
 			return true
 		}
 
-		// Pattern with wildcards
-		if strings.Contains(pattern.Pattern, "*") {
+		// Check if the pattern matches the entire base filename
+		if strings.Contains(pattern.Pattern, "*") || strings.Contains(pattern.Pattern, "?") {
+			// Try to match against the full path first
 			matched, err := filepath.Match(pattern.Pattern, normalizedPath)
 			if err == nil && matched {
 				return true
 			}
 
-			// Check if it matches a path component
+			// Try to match against the base filename
+			matched, err = filepath.Match(pattern.Pattern, filename)
+			if err == nil && matched {
+				return true
+			}
+
+			// Check each component in the path
 			pathParts := strings.Split(normalizedPath, "/")
 			for _, part := range pathParts {
 				matched, err := filepath.Match(pattern.Pattern, part)
@@ -99,8 +127,16 @@ func (il *IgnoreList) ShouldIgnore(path string, isDir bool) bool {
 		}
 
 		// Check for directory prefix match (e.g. "dir/" should match "dir/file.txt")
-		if isDir && strings.HasPrefix(normalizedPath, pattern.Pattern+"/") {
+		if pattern.IsDir && strings.HasPrefix(normalizedPath, pattern.Pattern+"/") {
 			return true
+		}
+
+		// Check extensions (*.ext format)
+		if strings.HasPrefix(pattern.Pattern, "*.") {
+			ext := pattern.Pattern[1:] // Get the ".ext" part
+			if strings.HasSuffix(filename, ext) {
+				return true
+			}
 		}
 	}
 
