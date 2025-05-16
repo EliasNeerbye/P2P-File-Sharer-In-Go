@@ -49,14 +49,6 @@ type Connection struct {
 func NewConnection(conn net.Conn, app *App, isClient bool) *Connection {
 	id := conn.RemoteAddr().String()
 
-	// Load ignore list
-	ignoreList, err := util.LoadIgnoreFile(app.Config.Folder)
-	if err != nil {
-		// Just log the error and continue with an empty ignore list
-		util.NewLogger(app.Config.Verbose, fmt.Sprintf("Conn-%s", id)).Warn("Failed to load .p2pignore: %v", err)
-		ignoreList = &util.IgnoreList{Patterns: []util.IgnorePattern{}}
-	}
-
 	c := &Connection{
 		ID:               id,
 		Conn:             conn,
@@ -67,9 +59,21 @@ func NewConnection(conn net.Conn, app *App, isClient bool) *Connection {
 		Name:             app.Config.Name,
 		isClient:         isClient,
 		responseHandlers: make(map[string]func(Message)),
-		ignoreList:       ignoreList,
+		ignoreList:       &util.IgnoreList{Patterns: []util.IgnorePattern{}}, // Empty default
 	}
 	return c
+}
+
+// loadIgnoreList reloads the .p2pignore file (should be called before each file operation)
+func (c *Connection) loadIgnoreList() *util.IgnoreList {
+	ignoreList, err := util.LoadIgnoreFile(c.App.Config.Folder)
+	if err != nil {
+		c.Log.Warn("Failed to load .p2pignore: %v", err)
+		return &util.IgnoreList{Patterns: []util.IgnorePattern{}}
+	}
+
+	c.ignoreList = ignoreList
+	return ignoreList
 }
 
 func (c *Connection) RegisterResponseHandler(id string, handler func(Message)) {
@@ -377,6 +381,9 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		}
 	}
 
+	// Reload the ignore file to get the latest patterns
+	c.loadIgnoreList()
+
 	// Filter out ignored files
 	var filteredFiles []string
 	for _, file := range files {
@@ -390,6 +397,11 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		filePath := filepath.Join(path, fileName)
 		isDir := strings.HasSuffix(fileName, "/")
 
+		// Always exclude .p2pignore files
+		if fileName == ".p2pignore" {
+			continue
+		}
+
 		if !c.ignoreList.ShouldIgnore(filePath, isDir) {
 			filteredFiles = append(filteredFiles, file)
 		}
@@ -399,6 +411,15 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 	if relPath == "" {
 		relPath = "."
 	}
+
+	if len(filteredFiles) == 0 {
+		result := fmt.Sprintf("Contents of %s: (empty or all files are ignored)", relPath)
+		return Message{
+			Type: MsgTypeCommandResult,
+			Data: result,
+		}
+	}
+
 	result := fmt.Sprintf("Contents of %s:\n%s", relPath, strings.Join(filteredFiles, "\n"))
 
 	return Message{
@@ -461,6 +482,9 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 	}
 
 	fullPath := filepath.Join(c.App.Config.Folder, filePath)
+
+	// Reload ignore list to get the latest patterns
+	c.loadIgnoreList()
 
 	// Check if file is in ignore list
 	fileInfo, err := os.Stat(fullPath)
@@ -751,6 +775,9 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 	}
 
+	// Reload ignore patterns before scanning directory
+	c.loadIgnoreList()
+
 	// Get all files in the directory, ignoring those in the ignore list
 	allFiles, err := util.ListFilesRecursive(fullPath)
 	if err != nil {
@@ -777,6 +804,14 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 
 		if !c.ignoreList.ShouldIgnore(relPath, false) {
 			files = append(files, file)
+		}
+	}
+
+	// Check if there are any files to transfer
+	if len(files) == 0 {
+		return Message{
+			Type: MsgTypeCommandResult,
+			Data: fmt.Sprintf("No transferable files found in directory %s (empty or all files ignored)", dirPath),
 		}
 	}
 
@@ -814,7 +849,7 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: fmt.Sprintf("Sending directory: %s", dirPath),
+		Data: fmt.Sprintf("Sending directory: %s (%d files)", dirPath, len(files)),
 	}
 }
 
@@ -857,9 +892,25 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 		}
 	}
 
+	// Create a .p2pignore file in this directory if one doesn't exist
+	// This serves as documentation, and the user can customize it later
+	ignoreFilePath := filepath.Join(fullPath, ".p2pignore")
+	if _, err := os.Stat(ignoreFilePath); os.IsNotExist(err) {
+		// Create with default example content
+		defaultIgnore := `# P2P File Sharing Ignore File
+# Files and directories matching these patterns will not be shared
+# Examples:
+# *.tmp
+# *.log
+# temp/
+`
+		// Don't throw an error if we can't create it - it's just a convenience
+		_ = os.WriteFile(ignoreFilePath, []byte(defaultIgnore), 0644)
+	}
+
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: "Ready to receive directory files",
+		Data: fmt.Sprintf("Ready to receive directory files into %s", dirPath),
 	}
 }
 
@@ -878,22 +929,75 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 		}
 	}
 
+	// Reload ignore patterns
+	c.loadIgnoreList()
+
 	// Filter out files in the ignore list
 	var filesToSend []string
+	var ignoredFiles []string
+	var notFoundFiles []string
+
 	for _, filePath := range cmd.Args {
 		fullPath := filepath.Join(c.App.Config.Folder, filePath)
 		fileInfo, err := os.Stat(fullPath)
 
-		if err == nil && !c.ignoreList.ShouldIgnore(filePath, fileInfo.IsDir()) {
-			filesToSend = append(filesToSend, filePath)
+		if err != nil {
+			notFoundFiles = append(notFoundFiles, filePath)
+			continue
 		}
+
+		// Skip .p2pignore files
+		if filepath.Base(filePath) == ".p2pignore" {
+			ignoredFiles = append(ignoredFiles, filePath+" (.p2pignore files cannot be transferred)")
+			continue
+		}
+
+		if c.ignoreList.ShouldIgnore(filePath, fileInfo.IsDir()) {
+			ignoredFiles = append(ignoredFiles, filePath+" (in .p2pignore list)")
+			continue
+		}
+
+		if fileInfo.IsDir() {
+			ignoredFiles = append(ignoredFiles, filePath+" (is a directory, use GETDIR)")
+			continue
+		}
+
+		filesToSend = append(filesToSend, filePath)
 	}
 
 	if len(filesToSend) == 0 {
-		return Message{
-			Type: MsgTypeError,
-			Data: "All specified files are either not found or in the ignore list",
+		result := "No files to transfer:\n"
+		if len(notFoundFiles) > 0 {
+			result += "- Files not found: " + strings.Join(notFoundFiles, ", ") + "\n"
 		}
+		if len(ignoredFiles) > 0 {
+			result += "- Files ignored: " + strings.Join(ignoredFiles, ", ") + "\n"
+		}
+		return Message{
+			Type: MsgTypeCommandResult,
+			Data: result,
+		}
+	}
+
+	// If some files were ignored or not found, include this information
+	var resultInfo string
+	if len(notFoundFiles) > 0 || len(ignoredFiles) > 0 {
+		resultInfo = fmt.Sprintf("Sending %d of %d requested files.\n",
+			len(filesToSend), len(cmd.Args))
+
+		if len(notFoundFiles) > 0 {
+			resultInfo += "- Files not found: " + strings.Join(notFoundFiles, ", ") + "\n"
+		}
+		if len(ignoredFiles) > 0 {
+			resultInfo += "- Files ignored: " + strings.Join(ignoredFiles, ", ") + "\n"
+		}
+
+		// Send this info before starting transfers
+		infoMsg := Message{
+			Type: MsgTypeCommandResult,
+			Data: resultInfo,
+		}
+		c.SendMessage(infoMsg)
 	}
 
 	for _, file := range filesToSend {
@@ -926,18 +1030,49 @@ func (c *Connection) handlePutMultipleCommand(cmd *Command) Message {
 		}
 	}
 
+	// Validate all paths
+	var validFiles []string
+	var invalidFiles []string
+
 	for _, file := range cmd.Args {
 		if !util.IsValidRelativePath(file) {
-			return Message{
-				Type: MsgTypeError,
-				Data: fmt.Sprintf("Invalid path: %s", file),
-			}
+			invalidFiles = append(invalidFiles, file+" (invalid path)")
+			continue
+		}
+
+		// Skip .p2pignore files
+		if filepath.Base(file) == ".p2pignore" {
+			invalidFiles = append(invalidFiles, file+" (.p2pignore files cannot be transferred)")
+			continue
+		}
+
+		validFiles = append(validFiles, file)
+	}
+
+	if len(validFiles) == 0 {
+		result := "No valid files to receive:\n"
+		if len(invalidFiles) > 0 {
+			result += "- Invalid files: " + strings.Join(invalidFiles, ", ") + "\n"
+		}
+
+		return Message{
+			Type: MsgTypeError,
+			Data: result,
+		}
+	}
+
+	// If some files were invalid, provide feedback
+	if len(invalidFiles) > 0 {
+		return Message{
+			Type: MsgTypeCommandResult,
+			Data: fmt.Sprintf("Ready to receive %d of %d files. \nSkipping invalid files: %s",
+				len(validFiles), len(cmd.Args), strings.Join(invalidFiles, ", ")),
 		}
 	}
 
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: "Ready to receive multiple files",
+		Data: fmt.Sprintf("Ready to receive %d files", len(validFiles)),
 	}
 }
 
