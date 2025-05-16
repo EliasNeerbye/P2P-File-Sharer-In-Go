@@ -38,7 +38,6 @@ type LogMessage struct {
 type Logger struct {
 	verbose bool
 	prefix  string
-	mu      sync.Mutex
 }
 
 var (
