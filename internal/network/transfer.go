@@ -55,7 +55,7 @@ func NewFileTransfer(name string, size int64, transferType string, conn *Connect
 func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 	now := time.Now()
 	elapsed := now.Sub(t.LastProgressTime).Seconds()
-
+	
 	if elapsed > 0 && t.LastProgressTime != t.StartTime {
 		currentSpeed := float64(bytesTransferred-t.BytesTransferred) / elapsed / 1024
 		if t.AvgSpeed == 0 {
@@ -65,7 +65,7 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		}
 		speed = t.AvgSpeed
 	}
-
+	
 	t.BytesTransferred = bytesTransferred
 	t.Speed = speed
 	t.LastUpdate = now
@@ -97,19 +97,15 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		typeStr = "↑ Sending"
 	}
 
-	fmt.Printf("\r%-60s", " ")
+	fmt.Printf("\r%-50s", " ")
 	fmt.Printf("\r%s %s: %s %.1f%% (%.2f KB/s) ETA: %s",
 		typeStr, t.Name, progBar, percentage, speed, eta)
-
-	if percentage >= 100 && t.Status == TransferStatusComplete {
-		fmt.Printf("\nTransfer complete: %s\n> ", t.Name)
-	}
 }
 
 func (t *FileTransfer) Pause() {
 	if t.Status == TransferStatusInProgress {
 		t.Status = TransferStatusPaused
-		fmt.Printf("\nTransfer paused: %s\n> ", t.Name)
+		fmt.Printf("\nTransfer paused: %s\n", t.Name)
 	}
 }
 
@@ -117,7 +113,7 @@ func (t *FileTransfer) Resume() {
 	if t.Status == TransferStatusPaused {
 		t.Status = TransferStatusInProgress
 		t.LastProgressTime = time.Now()
-		fmt.Printf("\nTransfer resumed: %s\n> ", t.Name)
+		fmt.Printf("\nTransfer resumed: %s\n", t.Name)
 	}
 }
 

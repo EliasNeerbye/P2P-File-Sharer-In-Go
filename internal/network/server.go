@@ -37,11 +37,19 @@ func StartListening(app *App) {
 
 			go connection.Start()
 
-			if len(app.Connections) == 1 {
+			if !app.Config.DualMode && len(app.Connections) == 1 {
 				go StartCommandInterface(app)
 			}
 		}
 	}()
 
-	wg.Wait()
+	if app.Config.TargetAddr != "" && app.Config.DualMode {
+		go StartDial(app)
+	}
+
+	if app.Config.DualMode {
+		StartCommandInterface(app)
+	} else {
+		wg.Wait()
+	}
 }

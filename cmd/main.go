@@ -15,11 +15,16 @@ func main() {
 
 	app := network.NewApp(cfg, log)
 
-	if cfg.TargetAddr != "" {
+	if cfg.TargetAddr != "" && !cfg.DualMode {
 		log.Info("Starting in client mode, connecting to %s", cfg.TargetAddr)
 		network.StartDial(app)
-	} else {
+	} else if cfg.TargetAddr == "" {
 		log.Info("Starting in server mode, listening on %s", cfg.ListenAddr)
+		network.StartListening(app)
+	} else {
+		log.Info("Starting in dual mode (client+server)")
+		log.Info("Listening on %s", cfg.ListenAddr)
+		log.Info("Connecting to %s", cfg.TargetAddr)
 		network.StartListening(app)
 	}
 }
@@ -35,4 +40,5 @@ func printConfig(cfg *config.Config, log *util.Logger) {
 	log.Debug("MaxSize:   %d", cfg.MaxSize)
 	log.Debug("Verify:    %t", cfg.Verify)
 	log.Debug("Verbose:   %t", cfg.Verbose)
+	log.Debug("DualMode:  %t", cfg.DualMode)
 }
