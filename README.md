@@ -6,16 +6,17 @@ A lightweight, peer-to-peer file sharing tool for local networks. This applicati
 
 ## ⭐ Key Features
 
--   **Dual Mode Operation**: Run as client, server, or both simultaneously
--   **Interactive Command Interface**: Easy-to-use command prompt for file operations
--   **Bidirectional Transfers**: Send and receive files in both directions
--   **Directory Transfers**: Transfer entire directories with a single command
--   **Pattern Matching**: Select multiple files using wildcards
--   **Transfer Controls**: Pause, resume, and cancel active transfers
--   **Progress Tracking**: Real-time progress bars with speed and ETA
--   **Security Controls**: Read-only and write-only modes, path validation
--   **Size Limitations**: Configurable maximum file size
--   **Concurrency**: Manage multiple simultaneous transfers
+- **Simple Connection Modes**: Run as client, server, or both simultaneously
+- **Interactive Command Interface**: Easy-to-use command prompt for file operations
+- **Bidirectional Transfers**: Send and receive files in both directions
+- **Directory Transfers**: Transfer entire directories with a single command
+- **Multiple File Selection**: Transfer multiple files at once
+- **Transfer Controls**: Pause, resume, and cancel active transfers
+- **Progress Tracking**: Real-time progress bars with speed and ETA
+- **Security Controls**: Read-only and write-only modes, path validation
+- **Size Limitations**: Configurable maximum file size
+- **Concurrency**: Manage multiple simultaneous transfers
+- **File Ignore Support**: Use `.p2pignore` files to exclude certain files from transfers
 
 ## 🛠️ Tech Stack
 
@@ -44,7 +45,6 @@ A lightweight, peer-to-peer file sharing tool for local networks. This applicati
 | `--maxsize`   | Integer | No       | 0 (Unlimited)     | 📏 Maximum file size in MB allowed for transfer                       |
 | `--verify`    | Boolean | No       | true              | ✅ Enables checksum verification to ensure file integrity             |
 | `--verbose`   | Boolean | No       | false             | 🔍 Enables detailed logging for network operations and file transfers |
-| `--dual`      | Boolean | No       | false             | 🔄 Run as both client and server simultaneously                       |
 
 ## 💻 Usage Examples
 
@@ -60,10 +60,10 @@ A lightweight, peer-to-peer file sharing tool for local networks. This applicati
 ./file-sharer --ip=192.168.1.10 --port=8080 --folder=./downloads
 ```
 
-### Starting in Dual Mode (Both Listening and Connecting)
+### Starting as Both (Listening and Connecting)
 
 ```
-./file-sharer --ip=192.168.1.10 --listen=:8080 --dual --folder=./shared
+./file-sharer --ip=192.168.1.10 --listen=:8080 --folder=./shared
 ```
 
 ### Starting with Restrictions
@@ -74,35 +74,51 @@ A lightweight, peer-to-peer file sharing tool for local networks. This applicati
 
 ## 📋 Available Commands
 
-Once the application is running, you'll see an interactive command prompt. Here are some of the available commands:
+Once the application is running, you'll see an interactive command prompt. Here are the available commands:
 
 ### Local Commands
 
--   `LS [path]` - List files in local directory
--   `CD <path>` - Change local directory
--   `PWD` - Show current working directory
--   `INFO` - Show information about this node
--   `HELP` - Show help message with all commands
--   `QUIT` or `EXIT` - Exit the application
+- `LS [path]` - List files in local directory
+- `CD <path>` - Change local directory
+- `PWD` - Show current working directory
+- `INFO` - Show information about this node
+- `HELP` - Show help message with all commands
+- `QUIT` or `EXIT` - Exit the application
 
 ### Remote Commands
 
--   `LSR [path]` - List files in remote directory
--   `CDR <path>` - Change remote directory
--   `GET <file>` - Download a file from remote peer
--   `PUT <file>` - Upload a file to remote peer
--   `GETDIR [dir]` - Download a directory from remote peer
--   `PUTDIR [dir]` - Upload a directory to remote peer
--   `GETM <pattern>` - Download multiple files matching pattern
--   `PUTM <pattern>` - Upload multiple files matching pattern
--   `STATUS` - Show active transfers
--   `MSG <message>` - Send a message to the remote peer
+- `LSR [path]` - List files in remote directory
+- `CDR <path>` - Change remote directory
+- `GET <file>` - Download a file from remote peer
+- `PUT <file>` - Upload a file to remote peer
+- `GETDIR [dir]` - Download a directory from remote peer
+- `PUTDIR [dir]` - Upload a directory to remote peer
+- `GETM <file1> <file2> ...` - Download multiple files
+- `PUTM <file1> <file2> ...` - Upload multiple files
+- `STATUS` - Show active transfers
+- `MSG <message>` - Send a message to the remote peer
 
 ### Transfer Control
 
--   `PAUSE <id>` - Pause a file transfer
--   `RESUME <id>` - Resume a paused transfer
--   `CANCEL <id>` - Cancel an active transfer
+- `PAUSE <id>` - Pause a file transfer
+- `RESUME <id>` - Resume a paused transfer
+- `CANCEL <id>` - Cancel an active transfer
+
+## 🔧 Configuration
+
+### .p2pignore Files
+
+You can create a `.p2pignore` file in any shared directory to specify files and directories that should not be transferred. The format is similar to `.gitignore`:
+
+```
+# Comments start with a hash symbol
+*.tmp
+*.log
+temp/
+private_data.txt
+```
+
+The application will automatically respect these ignore patterns when listing and transferring files.
 
 ## 🗂️ Project Structure
 
@@ -123,7 +139,9 @@ local-file-sharer/
 │   │   └── transfer.go        # File transfer operations
 │   └── util/
 │       ├── file.go            # File and directory utility functions
-│       └── logger.go          # Logging system with colored output
+│       ├── ignore.go          # Ignore file handling
+│       ├── logger.go          # Logging system with colored output
+│       └── path.go            # Path manipulation and validation
 ├── .gitignore                 # Git ignore file
 ├── LICENSE                    # GNU GPL v3
 ├── README.md                  # This file
@@ -132,11 +150,22 @@ local-file-sharer/
 
 ## 🔒 Security Considerations
 
--   The application validates all file paths to prevent directory traversal attacks
--   Both readonly and writeonly modes allow you to restrict operations
--   File size limits can be set to prevent large file transfers
--   All connections are authenticated with a simple handshake
--   Note that this tool is designed for trusted local networks, not the public internet
+- The application validates all file paths to prevent directory traversal attacks
+- Both readonly and writeonly modes allow you to restrict operations
+- File size limits can be set to prevent large file transfers
+- All connections are authenticated with a simple handshake
+- `.p2pignore` files allow you to prevent sensitive files from being shared
+- Note that this tool is designed for trusted local networks, not the public internet
+
+## 📈 Transfer Performance
+
+The application includes several features to optimize transfer performance:
+
+- Buffered I/O for efficient reading and writing
+- Progress tracking with estimated time of arrival (ETA)
+- Speed calculations based on a weighted average for more stable readings
+- Automatic file naming to handle duplicate files
+- Pause and resume functionality for long transfers
 
 ## 📄 License
 
