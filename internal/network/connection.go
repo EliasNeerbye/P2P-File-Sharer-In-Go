@@ -1,8 +1,11 @@
+// internal/network/connection.go
 package network
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +16,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	maxRetries  = 5
+	initialWait = 100 * time.Millisecond
 )
 
 func isPathSafe(requestedPath, baseFolder string) bool {
@@ -30,33 +38,50 @@ func isPathSafe(requestedPath, baseFolder string) bool {
 	return strings.HasPrefix(absTarget, absBase)
 }
 
+type PendingMessage struct {
+	Message      Message
+	RetryCount   int
+	LastAttempt  time.Time
+	ResponseChan chan Message
+}
+
 type Connection struct {
-	ID                string
-	Conn              net.Conn
-	Name              string
-	RemoteName        string
-	App               *App
-	Log               *util.Logger
-	Reader            *bufio.Reader
-	Writer            *bufio.Writer
-	isClient          bool
-	responseHandlers  map[string]func(Message)
-	responseHandlerMu sync.Mutex
-	sendMutex         sync.Mutex
+	ID                   string
+	Conn                 net.Conn
+	Name                 string
+	RemoteName           string
+	App                  *App
+	Log                  *util.Logger
+	Reader               *bufio.Reader
+	Writer               *bufio.Writer
+	isClient             bool
+	responseHandlers     map[string]func(Message)
+	responseHandlerMu    sync.Mutex
+	sendMutex            sync.Mutex
+	pendingMessages      map[string]*PendingMessage
+	pendingMessagesMutex sync.Mutex
+	healthCheck          *time.Ticker
+	lastMessageReceived  time.Time
+	lastPingSent         time.Time
+	activePings          map[string]time.Time
+	activePingsMutex     sync.Mutex
 }
 
 func NewConnection(conn net.Conn, app *App, isClient bool) *Connection {
 	id := conn.RemoteAddr().String()
 	c := &Connection{
-		ID:               id,
-		Conn:             conn,
-		App:              app,
-		Log:              util.NewLogger(app.Config.Verbose, fmt.Sprintf("Conn-%s", id)),
-		Reader:           bufio.NewReader(conn),
-		Writer:           bufio.NewWriter(conn),
-		Name:             app.Config.Name,
-		isClient:         isClient,
-		responseHandlers: make(map[string]func(Message)),
+		ID:                  id,
+		Conn:                conn,
+		App:                 app,
+		Log:                 util.NewLogger(app.Config.Verbose, fmt.Sprintf("Conn-%s", id)),
+		Reader:              bufio.NewReader(conn),
+		Writer:              bufio.NewWriter(conn),
+		Name:                app.Config.Name,
+		isClient:            isClient,
+		responseHandlers:    make(map[string]func(Message)),
+		pendingMessages:     make(map[string]*PendingMessage),
+		lastMessageReceived: time.Now(),
+		activePings:         make(map[string]time.Time),
 	}
 	return c
 }
@@ -87,15 +112,30 @@ func (c *Connection) Start() {
 		c.Log.Info("Client connected: %s (%s)", c.RemoteName, c.ID)
 	}
 
+	c.startHealthCheck()
+	go c.monitorPendingMessages()
+
 	for {
+		c.Conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		line, err := c.Reader.ReadString('\n')
+		c.Conn.SetReadDeadline(time.Time{})
+
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				if time.Since(c.lastMessageReceived) > 60*time.Second {
+					c.Log.Error("Connection timed out, no messages received for over 60 seconds")
+					break
+				}
+				continue
+			}
+
 			if err != io.EOF {
 				c.Log.Error("Read error: %v", err)
 			}
 			break
 		}
 
+		c.lastMessageReceived = time.Now()
 		c.handleMessage(strings.TrimSpace(line))
 	}
 }
@@ -110,7 +150,10 @@ func (c *Connection) Handshake() error {
 		return fmt.Errorf("failed to send handshake: %v", err)
 	}
 
+	c.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	line, err := c.Reader.ReadString('\n')
+	c.Conn.SetReadDeadline(time.Time{})
+
 	if err != nil {
 		return fmt.Errorf("failed to read handshake: %v", err)
 	}
@@ -129,6 +172,10 @@ func (c *Connection) Handshake() error {
 }
 
 func (c *Connection) Close() {
+	if c.healthCheck != nil {
+		c.healthCheck.Stop()
+	}
+
 	c.Conn.Close()
 	c.App.RemoveConnection(c)
 	c.Log.Info("Connection closed")
@@ -146,9 +193,63 @@ func (c *Connection) Close() {
 	}
 }
 
+func (c *Connection) startHealthCheck() {
+	c.healthCheck = time.NewTicker(10 * time.Second)
+
+	go func() {
+		for range c.healthCheck.C {
+			if time.Since(c.lastMessageReceived) > 25*time.Second &&
+				time.Since(c.lastPingSent) > 10*time.Second {
+				c.sendPing()
+			}
+
+			c.checkActivePings()
+		}
+	}()
+}
+
+func (c *Connection) sendPing() {
+	pingID := fmt.Sprintf("ping-%d", time.Now().UnixNano())
+	ping := Message{
+		Type: MsgTypePing,
+		ID:   pingID,
+	}
+
+	c.RegisterResponseHandler(pingID, func(msg Message) {
+		if msg.Type == MsgTypePong {
+			c.activePingsMutex.Lock()
+			delete(c.activePings, pingID)
+			c.activePingsMutex.Unlock()
+		}
+	})
+
+	c.activePingsMutex.Lock()
+	c.activePings[pingID] = time.Now()
+	c.activePingsMutex.Unlock()
+
+	c.lastPingSent = time.Now()
+	c.SendMessage(ping)
+}
+
+func (c *Connection) checkActivePings() {
+	c.activePingsMutex.Lock()
+	defer c.activePingsMutex.Unlock()
+
+	for id, sentTime := range c.activePings {
+		if time.Since(sentTime) > 30*time.Second {
+			c.Log.Warn("Ping %s timed out after 30 seconds", id)
+			delete(c.activePings, id)
+		}
+	}
+}
+
 func (c *Connection) SendMessage(msg Message) error {
 	c.sendMutex.Lock()
 	defer c.sendMutex.Unlock()
+
+	if msg.ID == "" && msg.RequiresAck() {
+		msg.ID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
+	}
 
 	data, err := msg.Marshal()
 	if err != nil {
@@ -161,40 +262,135 @@ func (c *Connection) SendMessage(msg Message) error {
 	_, err = c.Writer.WriteString(string(data) + "\n")
 	if err != nil {
 		c.Log.Error("Failed to send message: %v", err)
-
 		if c.isClient {
 			c.Close()
 		}
-
 		return err
 	}
 
-	return c.Writer.Flush()
+	err = c.Writer.Flush()
+	if err != nil {
+		c.Log.Error("Failed to flush message: %v", err)
+		return err
+	}
+
+	if msg.RequiresAck() && msg.Type != MsgTypeCommandResult {
+		c.addPendingMessage(msg)
+	}
+
+	return nil
+}
+
+func (c *Connection) addPendingMessage(msg Message) {
+	if msg.ID == "" {
+		return
+	}
+
+	c.pendingMessagesMutex.Lock()
+	defer c.pendingMessagesMutex.Unlock()
+
+	c.pendingMessages[msg.ID] = &PendingMessage{
+		Message:      msg.Clone(),
+		RetryCount:   0,
+		LastAttempt:  time.Now(),
+		ResponseChan: make(chan Message, 1),
+	}
+}
+
+func (c *Connection) monitorPendingMessages() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+
+			c.pendingMessagesMutex.Lock()
+			for id, pending := range c.pendingMessages {
+				if pending.RetryCount >= maxRetries {
+					c.Log.Error("Message %s failed after %d retries", id, maxRetries)
+					delete(c.pendingMessages, id)
+					continue
+				}
+
+				waitTime := initialWait * (1 << uint(pending.RetryCount))
+				if now.Sub(pending.LastAttempt) > waitTime {
+					msg := pending.Message.Clone()
+					msg.IncrementRetry()
+					pending.RetryCount++
+					pending.LastAttempt = now
+
+					go func(m Message) {
+						c.sendMutex.Lock()
+						data, _ := m.Marshal()
+						c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+						c.Writer.WriteString(string(data) + "\n")
+						c.Writer.Flush()
+						c.Conn.SetWriteDeadline(time.Time{})
+						c.sendMutex.Unlock()
+					}(msg)
+				}
+			}
+			c.pendingMessagesMutex.Unlock()
+		}
+	}
+}
+
+func (c *Connection) removePendingMessage(id string) {
+	c.pendingMessagesMutex.Lock()
+	defer c.pendingMessagesMutex.Unlock()
+	delete(c.pendingMessages, id)
 }
 
 func (c *Connection) SendReliableMessage(msg Message) error {
-	maxRetries := 3
-	retryDelay := 100 * time.Millisecond
-
-	var err error
-	for i := 0; i < maxRetries; i++ {
-		err = c.SendMessage(msg)
-		if err == nil {
-			return nil
-		}
-
-		c.Log.Warn("Message send failed (attempt %d/%d): %v", i+1, maxRetries, err)
-		time.Sleep(retryDelay)
-		retryDelay *= 2
+	if msg.ID == "" {
+		msg.ID = fmt.Sprintf("reliable-%d", time.Now().UnixNano())
 	}
 
-	return fmt.Errorf("failed to send message after %d attempts: %v", maxRetries, err)
+	responseChan := make(chan Message, 1)
+	errchan := make(chan error, 1)
+
+	c.RegisterResponseHandler(msg.ID, func(resp Message) {
+		responseChan <- resp
+	})
+
+	defer c.UnregisterResponseHandler(msg.ID)
+
+	if err := c.SendMessage(msg); err != nil {
+		return err
+	}
+
+	select {
+	case <-responseChan:
+		return nil
+	case <-time.After(15 * time.Second):
+		return fmt.Errorf("reliable message timed out waiting for response")
+	}
 }
 
 func (c *Connection) handleMessage(messageStr string) {
 	var msg Message
 	if err := json.Unmarshal([]byte(messageStr), &msg); err != nil {
 		c.Log.Error("Invalid message format: %v", err)
+		return
+	}
+
+	if msg.RequiresAck() && msg.Type != MsgTypeACK {
+		ackMsg := NewAckMessage(msg.ID)
+		c.SendMessage(ackMsg)
+	}
+
+	if msg.Type == MsgTypeACK {
+		c.removePendingMessage(msg.ID)
+	}
+
+	if msg.Type == MsgTypePing {
+		pongMsg := Message{
+			Type: MsgTypePong,
+			ID:   msg.ID,
+		}
+		c.SendMessage(pongMsg)
 		return
 	}
 
@@ -420,6 +616,14 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		}
 	}
 
+	// Skip restricted files
+	if filepath.Base(filePath) == ".fshignore" || filepath.Base(filePath) == ".gitignore" {
+		return Message{
+			Type: MsgTypeError,
+			Data: "This file is restricted for transfer",
+		}
+	}
+
 	fullPath := filepath.Join(c.App.Config.Folder, filePath)
 
 	info, err := os.Stat(fullPath)
@@ -456,9 +660,18 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 	transfer.File = file
 	c.App.AddTransfer(transfer)
 
+	if c.App.Config.Verify {
+		checksum, err := transfer.CalculateChecksum()
+		if err != nil {
+			c.Log.Warn("Failed to calculate checksum: %v", err)
+		} else {
+			transfer.Checksum = checksum
+		}
+	}
+
 	startMsg := Message{
 		Type: MsgTypeFileStart,
-		Data: fmt.Sprintf("%s|%d", filePath, info.Size()),
+		Data: fmt.Sprintf("%s|%d|%s", filePath, info.Size(), transfer.Checksum),
 	}
 	if err := c.SendReliableMessage(startMsg); err != nil {
 		file.Close()
@@ -481,6 +694,10 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		chunksSent := 0
 
 		for {
+			if transfer.WaitForPauseIfNeeded() {
+				return
+			}
+
 			n, err := file.Read(buffer)
 			if err != nil && err != io.EOF {
 				transfer.Status = TransferStatusFailed
@@ -490,6 +707,11 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 			if n == 0 {
 				break
+			}
+
+			// Check for pause or cancellation
+			if transfer.Status == TransferStatusFailed {
+				return
 			}
 
 			dataMsg := NewBinaryMessage(MsgTypeFileData, buffer[:n])
@@ -526,23 +748,27 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 		endMsg := Message{
 			Type: MsgTypeFileEnd,
-			Data: filePath,
+			Data: fmt.Sprintf("%s|%s", filePath, transfer.Checksum),
 		}
-		if err := c.SendReliableMessage(endMsg); err != nil {
+
+		// Use a reliable send for the end message with multiple retries
+		var endErr error
+		for i := 0; i < 5; i++ {
+			endErr = c.SendReliableMessage(endMsg)
+			if endErr == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond * time.Duration(i+1))
+		}
+
+		if endErr != nil {
 			transfer.Status = TransferStatusFailed
-			c.Log.Error("Failed to send file end: %v", err)
+			c.Log.Error("Failed to send file end: %v", endErr)
 			return
 		}
 
-		transfer.Status = TransferStatusWaitingAck
-
-		go func() {
-			time.Sleep(10 * time.Second)
-			if transfer.Status == TransferStatusWaitingAck {
-				transfer.Status = TransferStatusFailed
-				c.Log.Error("Transfer timed out waiting for ACK")
-			}
-		}()
+		transfer.Status = TransferStatusComplete
+		c.Log.Success("File transfer complete: %s", filePath)
 	}()
 
 	return Message{
@@ -649,7 +875,11 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 	for _, file := range files {
 		relPath, err := filepath.Rel(c.App.Config.Folder, file)
 		if err == nil {
-			fileList = append(fileList, relPath)
+			// Skip system and ignore files
+			baseName := filepath.Base(relPath)
+			if baseName != ".fshignore" && baseName != ".gitignore" {
+				fileList = append(fileList, relPath)
+			}
 		}
 	}
 
@@ -729,7 +959,16 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 		}
 	}
 
-	if len(matchedFiles) == 0 {
+	// Filter out ignore files
+	filteredFiles := make([]string, 0, len(matchedFiles))
+	for _, path := range matchedFiles {
+		baseName := filepath.Base(path)
+		if baseName != ".fshignore" && baseName != ".gitignore" {
+			filteredFiles = append(filteredFiles, path)
+		}
+	}
+
+	if len(filteredFiles) == 0 {
 		return Message{
 			Type: MsgTypeError,
 			Data: "No files match the specified patterns or names",
@@ -738,7 +977,7 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: strings.Join(matchedFiles, "\n"),
+		Data: strings.Join(filteredFiles, "\n"),
 	}
 }
 
@@ -795,7 +1034,7 @@ func (c *Connection) handleStatusCommand(cmd *Command) Message {
 
 func (c *Connection) handleFileStart(msg Message) {
 	parts := strings.Split(msg.Data, "|")
-	if len(parts) != 2 {
+	if len(parts) < 2 {
 		c.SendError("Invalid file start format")
 		return
 	}
@@ -813,6 +1052,11 @@ func (c *Connection) handleFileStart(msg Message) {
 		return
 	}
 
+	checksum := ""
+	if len(parts) > 2 {
+		checksum = parts[2]
+	}
+
 	if c.App.Config.MaxSize > 0 && fileSize > int64(c.App.Config.MaxSize*1024*1024) {
 		c.SendError(fmt.Sprintf("File size exceeds maximum allowed size of %d MB", c.App.Config.MaxSize))
 		return
@@ -820,6 +1064,12 @@ func (c *Connection) handleFileStart(msg Message) {
 
 	if c.App.Config.WriteOnly {
 		c.SendError("This node is in write-only mode and cannot receive files")
+		return
+	}
+
+	// Skip restricted files
+	if filepath.Base(filePath) == ".fshignore" || filepath.Base(filePath) == ".gitignore" {
+		c.SendError("This file is restricted for transfer")
 		return
 	}
 
@@ -839,6 +1089,7 @@ func (c *Connection) handleFileStart(msg Message) {
 
 	transfer := NewFileTransfer(filePath, fileSize, TransferTypeReceive, c)
 	transfer.File = file
+	transfer.Checksum = checksum
 	c.App.AddTransfer(transfer)
 
 	c.Log.Info("Starting to receive file %s (%d bytes)", filePath, fileSize)
@@ -849,7 +1100,7 @@ func (c *Connection) handleFileData(msg Message) {
 	var transfer *FileTransfer
 
 	for _, t := range transfers {
-		if t.Conn == c && t.Type == TransferTypeReceive {
+		if t.Conn == c && t.Type == TransferTypeReceive && t.Status == TransferStatusInProgress {
 			transfer = t
 			break
 		}
@@ -862,6 +1113,10 @@ func (c *Connection) handleFileData(msg Message) {
 
 	if transfer.File == nil {
 		c.SendError("File not open for writing")
+		return
+	}
+
+	if transfer.Status == TransferStatusPaused {
 		return
 	}
 
@@ -889,13 +1144,20 @@ func (c *Connection) handleFileData(msg Message) {
 		progress := (transfer.BytesTransferred * 100) / transfer.TotalSize
 		if progress > transfer.LastProgress+4 {
 			transfer.LastProgress = progress
-			transfer.UpdateProgress(transfer.BytesTransferred, transfer.Speed)
+			elapsedTime := time.Since(transfer.StartTime).Seconds()
+			speed := float64(transfer.BytesTransferred) / elapsedTime / 1024
+			transfer.UpdateProgress(transfer.BytesTransferred, speed)
 		}
 	}
 }
 
 func (c *Connection) handleFileEnd(msg Message) {
-	filePath := msg.Data
+	parts := strings.Split(msg.Data, "|")
+	filePath := parts[0]
+	remoteChecksum := ""
+	if len(parts) > 1 {
+		remoteChecksum = parts[1]
+	}
 
 	transfers := c.App.GetTransfers()
 	var transfer *FileTransfer
@@ -917,6 +1179,35 @@ func (c *Connection) handleFileEnd(msg Message) {
 		transfer.File = nil
 	}
 
+	// Verify checksum if needed
+	if c.App.Config.Verify && remoteChecksum != "" {
+		file, err := os.Open(filepath.Join(c.App.Config.Folder, filePath))
+		if err != nil {
+			c.Log.Error("Failed to open file for checksum verification: %v", err)
+		} else {
+			defer file.Close()
+
+			hash := sha256.New()
+			if _, err := io.Copy(hash, file); err != nil {
+				c.Log.Error("Failed to calculate checksum: %v", err)
+			} else {
+				localChecksum := hex.EncodeToString(hash.Sum(nil))
+				if localChecksum != remoteChecksum {
+					c.Log.Error("Checksum verification failed: expected %s, got %s", remoteChecksum, localChecksum)
+					transfer.Status = TransferStatusFailed
+
+					// Delete the corrupted file
+					file.Close()
+					os.Remove(filepath.Join(c.App.Config.Folder, filePath))
+
+					c.SendError(fmt.Sprintf("Checksum verification failed for %s", filePath))
+					return
+				}
+				c.Log.Success("Checksum verification successful for %s", filePath)
+			}
+		}
+	}
+
 	transfer.Status = TransferStatusComplete
 	c.Log.Success("File transfer complete: %s", filePath)
 
@@ -926,16 +1217,12 @@ func (c *Connection) handleFileEnd(msg Message) {
 		Data: filePath,
 	}
 
-	go func() {
-		// Try sending the ACK multiple times to ensure it reaches the sender
-		for i := 0; i < 5; i++ {
-			c.SendMessage(ackMsg)
-			time.Sleep(500 * time.Millisecond)
-		}
-	}()
+	for i := 0; i < 5; i++ {
+		c.SendMessage(ackMsg)
+		time.Sleep(300 * time.Millisecond)
+	}
 
 	fmt.Printf("\nFile transfer complete: %s\n> ", filePath)
-
 	c.App.RemoveTransfer(transfer)
 }
 
@@ -971,7 +1258,7 @@ func (c *Connection) handleAck(msg Message) {
 
 	var transfer *FileTransfer
 	for _, t := range c.App.Transfers {
-		if t.Name == filePath && t.Conn == c && (t.Status == TransferStatusWaitingAck || t.Status == TransferStatusComplete) {
+		if t.Name == filePath && t.Conn == c && (t.Status == TransferStatusWaitingAck || t.Status == TransferStatusInProgress) {
 			transfer = t
 			break
 		}

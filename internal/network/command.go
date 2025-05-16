@@ -53,7 +53,6 @@ func StartCommandInterface(app *App) {
 
 	setupGracefulShutdown(app)
 
-	// Setup raw terminal mode for tab completion
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		log.Error("Failed to set terminal to raw mode: %v", err)
@@ -62,54 +61,13 @@ func StartCommandInterface(app *App) {
 	}
 
 	terminal := term.NewTerminal(os.Stdin, "> ")
-	terminal.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
-		if key != '\t' {
-			return "", 0, false
-		}
-
-		parts := strings.Fields(line[:pos])
-		if len(parts) == 0 {
-			return "", 0, false
-		}
-
-		cmd := strings.ToUpper(parts[0])
-
-		// Only provide completions for certain commands
-		if (cmd == "GET" || cmd == "PUT" || cmd == "CD" || cmd == "LS" || cmd == "GETDIR" || cmd == "PUTDIR") && len(parts) == 2 && key == '\t' {
-			partial := ""
-			if len(parts) > 1 {
-				partial = parts[1]
-			}
-
-			// Get completions
-			var completions []string
-			if cmd == "GET" || cmd == "GETDIR" {
-				// Remote file completions would require server query, not implemented
-				return "", 0, false
-			} else {
-				completions = util.GetFileCompletions(app.Config.Folder, partial)
-			}
-
-			if len(completions) == 1 {
-				// Single completion - replace the current arg
-				newLine := cmd + " " + completions[0]
-				return newLine, len(newLine), true
-			} else if len(completions) > 1 {
-				// Multiple completions - show options
-				fmt.Println()
-				for _, c := range completions {
-					fmt.Println(c)
-				}
-				fmt.Print("> " + line)
-				return "", 0, false
-			}
-		}
-
-		return "", 0, false
-	}
+	terminal.AutoCompleteCallback = createAutoCompleteCallback(app)
 
 	for app.Ready {
+		util.SetTerminalBusy(true)
 		line, err := terminal.ReadLine()
+		util.SetTerminalBusy(false)
+
 		if err != nil {
 			if err != io.EOF {
 				log.Error("Failed to read input: %v", err)
@@ -124,8 +82,50 @@ func StartCommandInterface(app *App) {
 
 		if err := parser.Execute(input); err != nil {
 			log.Error("Command failed: %v", err)
-			fmt.Print("> ")
 		}
+	}
+}
+
+func createAutoCompleteCallback(app *App) func(line string, pos int, key rune) (string, int, bool) {
+	return func(line string, pos int, key rune) (string, int, bool) {
+		if key != '\t' {
+			return "", 0, false
+		}
+
+		parts := strings.Fields(line[:pos])
+		if len(parts) == 0 {
+			return "", 0, false
+		}
+
+		cmd := strings.ToUpper(parts[0])
+
+		if (cmd == "GET" || cmd == "PUT" || cmd == "CD" || cmd == "LS" || cmd == "GETDIR" || cmd == "PUTDIR") && len(parts) == 2 && key == '\t' {
+			partial := ""
+			if len(parts) > 1 {
+				partial = parts[1]
+			}
+
+			var completions []string
+			if cmd == "GET" || cmd == "GETDIR" {
+				return "", 0, false
+			} else {
+				completions = util.GetFileCompletions(app.Config.Folder, partial)
+			}
+
+			if len(completions) == 1 {
+				newLine := cmd + " " + completions[0]
+				return newLine, len(newLine), true
+			} else if len(completions) > 1 {
+				fmt.Println()
+				for _, c := range completions {
+					fmt.Println(c)
+				}
+				fmt.Print("> " + line)
+				return "", 0, false
+			}
+		}
+
+		return "", 0, false
 	}
 }
 
@@ -223,10 +223,6 @@ func (p *CommandParser) Execute(input string) error {
 		err = p.handleClear()
 	default:
 		return fmt.Errorf("unknown command: %s", cmdName)
-	}
-
-	if err == nil {
-		fmt.Print("> ")
 	}
 
 	return err
@@ -346,7 +342,6 @@ func (p *CommandParser) handleQuit() error {
 }
 
 func (p *CommandParser) handleClear() error {
-	// ANSI escape sequence to clear screen and move cursor to top-left
 	fmt.Print("\033[H\033[2J")
 	return nil
 }
@@ -489,6 +484,10 @@ func (p *CommandParser) handleGetDir(args []string) error {
 			continue
 		}
 
+		if filepath.Base(file) == ".fshignore" {
+			continue
+		}
+
 		fmt.Printf("Getting file: %s\n", file)
 		err := p.handleGet([]string{file})
 		if err != nil {
@@ -554,6 +553,10 @@ func (p *CommandParser) handleGetMultiple(args []string) error {
 	}
 
 	for _, file := range args {
+		if filepath.Base(file) == ".fshignore" {
+			continue
+		}
+
 		fmt.Printf("Getting file: %s\n", file)
 		err := p.handleGet([]string{file})
 		if err != nil {
@@ -595,7 +598,7 @@ func (p *CommandParser) handlePutMultiple(args []string) error {
 
 		fileList := strings.Split(matches, "\n")
 		for _, file := range fileList {
-			if file == "" {
+			if file == "" || filepath.Base(file) == ".fshignore" {
 				continue
 			}
 

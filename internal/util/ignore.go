@@ -1,3 +1,4 @@
+// internal/util/ignore.go
 package util
 
 import (
@@ -23,7 +24,6 @@ func LoadIgnoreFile(path string) (*IgnoreList, error) {
 
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {
-		// Ignore file not found is not an error
 		return ignoreList, nil
 	} else if err != nil {
 		return nil, err
@@ -34,7 +34,6 @@ func LoadIgnoreFile(path string) (*IgnoreList, error) {
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
-		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -55,25 +54,40 @@ func LoadIgnoreFile(path string) (*IgnoreList, error) {
 }
 
 func LoadDefaultIgnoreFile(baseDir string) *IgnoreList {
+	// Always add system files to ignore list
+	defaultIgnore := &IgnoreList{
+		Patterns: []IgnorePattern{
+			{Pattern: ".fshignore", IsNegated: false},
+			{Pattern: ".gitignore", IsNegated: false},
+		},
+	}
+
 	// Try to load .fshignore first (our own format)
 	ignoreList, err := LoadIgnoreFile(filepath.Join(baseDir, ".fshignore"))
 	if err == nil && len(ignoreList.Patterns) > 0 {
-		return ignoreList
+		defaultIgnore.Patterns = append(defaultIgnore.Patterns, ignoreList.Patterns...)
+		return defaultIgnore
 	}
 
 	// Try to load .gitignore as fallback
 	ignoreList, err = LoadIgnoreFile(filepath.Join(baseDir, ".gitignore"))
 	if err == nil {
-		return ignoreList
+		defaultIgnore.Patterns = append(defaultIgnore.Patterns, ignoreList.Patterns...)
+		return defaultIgnore
 	}
 
-	// Return empty ignore list if no valid ignore file found
-	return &IgnoreList{Patterns: make([]IgnorePattern, 0)}
+	return defaultIgnore
 }
 
 func (il *IgnoreList) ShouldIgnore(path string) bool {
 	if len(il.Patterns) == 0 {
 		return false
+	}
+
+	// Always ignore system files
+	baseName := filepath.Base(path)
+	if baseName == ".fshignore" || baseName == ".gitignore" {
+		return true
 	}
 
 	// Clean path for checking
@@ -85,8 +99,12 @@ func (il *IgnoreList) ShouldIgnore(path string) bool {
 	for _, pattern := range il.Patterns {
 		matched, err := filepath.Match(pattern.Pattern, path)
 		if err != nil {
-			// If pattern is invalid, just skip it
 			continue
+		}
+
+		// Also check basename match
+		if !matched {
+			matched, _ = filepath.Match(pattern.Pattern, baseName)
 		}
 
 		// Also try to match with directories
@@ -100,4 +118,9 @@ func (il *IgnoreList) ShouldIgnore(path string) bool {
 	}
 
 	return ignored
+}
+
+func IsSystemFile(path string) bool {
+	basename := filepath.Base(path)
+	return basename == ".fshignore" || basename == ".gitignore"
 }
