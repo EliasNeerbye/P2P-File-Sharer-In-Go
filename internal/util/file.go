@@ -219,3 +219,49 @@ func IsValidRelativePath(path string) bool {
 
 	return true
 }
+
+// FilterIgnoredFiles filters out files that match patterns in the ignore list
+func FilterIgnoredFiles(files []string, baseDir string, ignoreList *IgnoreList) []string {
+	if ignoreList == nil || len(ignoreList.Patterns) == 0 {
+		return files
+	}
+
+	var filtered []string
+	for _, file := range files {
+		isDir := strings.HasSuffix(file, "/")
+
+		relPath, err := filepath.Rel(baseDir, file)
+		if err != nil {
+			// If we can't get a relative path, include the file
+			filtered = append(filtered, file)
+			continue
+		}
+
+		if !ignoreList.ShouldIgnore(relPath, isDir) {
+			filtered = append(filtered, file)
+		}
+	}
+
+	return filtered
+}
+
+// EnsureUniqueFilename ensures the filename is unique by appending a suffix
+func EnsureUniqueFilename(filePath string) string {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return filePath
+	}
+
+	dir := filepath.Dir(filePath)
+	baseName := filepath.Base(filePath)
+	ext := filepath.Ext(baseName)
+	nameOnly := strings.TrimSuffix(baseName, ext)
+
+	counter := 1
+	for {
+		newName := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", nameOnly, counter, ext))
+		if _, err := os.Stat(newName); os.IsNotExist(err) {
+			return newName
+		}
+		counter++
+	}
+}

@@ -33,6 +33,7 @@ type FileTransfer struct {
 	LastProgressTime time.Time
 	AvgSpeed         float64
 	Retries          int
+	AckIDs           map[string]bool // Track message IDs that need acknowledgment
 }
 
 func NewFileTransfer(name string, size int64, transferType string, conn *Connection) *FileTransfer {
@@ -49,6 +50,7 @@ func NewFileTransfer(name string, size int64, transferType string, conn *Connect
 		Speed:            0,
 		AvgSpeed:         0,
 		Conn:             conn,
+		AckIDs:           make(map[string]bool),
 	}
 }
 
@@ -115,6 +117,35 @@ func (t *FileTransfer) Resume() {
 		t.LastProgressTime = time.Now()
 		fmt.Printf("\nTransfer resumed: %s\n", t.Name)
 	}
+}
+
+// WaitForAcknowledgment waits for all registered ACK IDs to be cleared
+func (t *FileTransfer) WaitForAcknowledgment(timeout time.Duration) bool {
+	if len(t.AckIDs) == 0 {
+		return true
+	}
+
+	checkInterval := 100 * time.Millisecond
+	endTime := time.Now().Add(timeout)
+
+	for time.Now().Before(endTime) {
+		if len(t.AckIDs) == 0 {
+			return true
+		}
+		time.Sleep(checkInterval)
+	}
+
+	return false
+}
+
+// RegisterAckID adds a message ID that needs acknowledgment
+func (t *FileTransfer) RegisterAckID(id string) {
+	t.AckIDs[id] = true
+}
+
+// AcknowledgeID marks a message ID as acknowledged
+func (t *FileTransfer) AcknowledgeID(id string) {
+	delete(t.AckIDs, id)
 }
 
 func generateProgressBar(percentage float64, width int) string {

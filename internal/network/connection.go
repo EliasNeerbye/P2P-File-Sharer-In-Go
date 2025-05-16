@@ -43,10 +43,20 @@ type Connection struct {
 	responseHandlers  map[string]func(Message)
 	responseHandlerMu sync.Mutex
 	sendMutex         sync.Mutex
+	ignoreList        *util.IgnoreList
 }
 
 func NewConnection(conn net.Conn, app *App, isClient bool) *Connection {
 	id := conn.RemoteAddr().String()
+
+	// Load ignore list
+	ignoreList, err := util.LoadIgnoreFile(app.Config.Folder)
+	if err != nil {
+		// Just log the error and continue with an empty ignore list
+		util.NewLogger(app.Config.Verbose, fmt.Sprintf("Conn-%s", id)).Warn("Failed to load .p2pignore: %v", err)
+		ignoreList = &util.IgnoreList{Patterns: []util.IgnorePattern{}}
+	}
+
 	c := &Connection{
 		ID:               id,
 		Conn:             conn,
@@ -57,6 +67,7 @@ func NewConnection(conn net.Conn, app *App, isClient bool) *Connection {
 		Name:             app.Config.Name,
 		isClient:         isClient,
 		responseHandlers: make(map[string]func(Message)),
+		ignoreList:       ignoreList,
 	}
 	return c
 }
@@ -322,6 +333,12 @@ func (c *Connection) handleCDCommand(cmd *Command) Message {
 
 	c.App.Config.Folder = fullPath
 
+	// Reload ignore list for the new folder
+	ignoreList, _ := util.LoadIgnoreFile(c.App.Config.Folder)
+	if ignoreList != nil {
+		c.ignoreList = ignoreList
+	}
+
 	return Message{
 		Type: MsgTypeCommandResult,
 		Data: fmt.Sprintf("Changed to %s", path),
@@ -360,11 +377,29 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		}
 	}
 
+	// Filter out ignored files
+	var filteredFiles []string
+	for _, file := range files {
+		// Skip hidden files and directories that begin with .
+		// Extract just the filename without the size part
+		fileName := file
+		if idx := strings.Index(file, " "); idx > 0 {
+			fileName = file[:idx]
+		}
+
+		filePath := filepath.Join(path, fileName)
+		isDir := strings.HasSuffix(fileName, "/")
+
+		if !c.ignoreList.ShouldIgnore(filePath, isDir) {
+			filteredFiles = append(filteredFiles, file)
+		}
+	}
+
 	relPath, _ := filepath.Rel(c.App.Config.Folder, absPath)
 	if relPath == "" {
 		relPath = "."
 	}
-	result := fmt.Sprintf("Contents of %s:\n%s", relPath, strings.Join(files, "\n"))
+	result := fmt.Sprintf("Contents of %s:\n%s", relPath, strings.Join(filteredFiles, "\n"))
 
 	return Message{
 		Type: MsgTypeCommandResult,
@@ -418,6 +453,15 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 	}
 
 	fullPath := filepath.Join(c.App.Config.Folder, filePath)
+
+	// Check if file is in ignore list
+	fileInfo, err := os.Stat(fullPath)
+	if err == nil && c.ignoreList.ShouldIgnore(filePath, fileInfo.IsDir()) {
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("File %s is in .p2pignore list and cannot be transferred", filePath),
+		}
+	}
 
 	info, err := os.Stat(fullPath)
 	if err != nil {
@@ -477,6 +521,20 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		startTime := time.Now()
 		chunksSent := 0
 
+		// Create ACK channel for two-way communication
+		ackChan := make(chan bool, 1)
+		ackID := fmt.Sprintf("ack-%s-%d", filePath, time.Now().UnixNano())
+
+		c.RegisterResponseHandler(ackID, func(msg Message) {
+			if msg.Type == MsgTypeACK && msg.Data == filePath {
+				select {
+				case ackChan <- true:
+				default:
+				}
+			}
+		})
+		defer c.UnregisterResponseHandler(ackID)
+
 		for {
 			if transfer.Status == TransferStatusPaused {
 				time.Sleep(100 * time.Millisecond)
@@ -499,6 +557,7 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 			}
 
 			dataMsg := NewBinaryMessage(MsgTypeFileData, buffer[:n])
+			dataMsg.ID = ackID
 			if err := c.SendMessage(dataMsg); err != nil {
 				transfer.Status = TransferStatusFailed
 				c.Log.Error("Failed to send file data: %v", err)
@@ -520,6 +579,7 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 					progMsg := Message{
 						Type: MsgTypeProgress,
 						Data: fmt.Sprintf("%s|%d|%d|%.2f", filePath, totalSent, info.Size(), speed),
+						ID:   ackID,
 					}
 					c.SendMessage(progMsg)
 
@@ -535,6 +595,7 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		endMsg := Message{
 			Type: MsgTypeFileEnd,
 			Data: filePath,
+			ID:   ackID,
 		}
 		if err := c.SendReliableMessage(endMsg); err != nil {
 			transfer.Status = TransferStatusFailed
@@ -544,13 +605,15 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 		transfer.Status = TransferStatusWaitingAck
 
-		go func() {
-			time.Sleep(10 * time.Second)
-			if transfer.Status == TransferStatusWaitingAck {
-				transfer.Status = TransferStatusFailed
-				c.Log.Error("Transfer timed out waiting for ACK")
-			}
-		}()
+		// Wait for ACK with a timeout
+		select {
+		case <-ackChan:
+			transfer.Status = TransferStatusComplete
+			c.Log.Success("Transfer completed and acknowledged: %s", filePath)
+		case <-time.After(30 * time.Second): // Increased timeout for larger files
+			transfer.Status = TransferStatusFailed
+			c.Log.Error("Transfer timed out waiting for ACK: %s", filePath)
+		}
 	}()
 
 	return Message{
@@ -606,6 +669,18 @@ func (c *Connection) handleInfoCommand(_ *Command) Message {
 		info += "Max file size: Unlimited\n"
 	}
 
+	// Add information about ignore patterns
+	if len(c.ignoreList.Patterns) > 0 {
+		info += fmt.Sprintf("\nIgnore patterns (%d):\n", len(c.ignoreList.Patterns))
+		for _, pattern := range c.ignoreList.Patterns {
+			if pattern.IsDir {
+				info += fmt.Sprintf("  %s/ (directory)\n", pattern.Pattern)
+			} else {
+				info += fmt.Sprintf("  %s\n", pattern.Pattern)
+			}
+		}
+	}
+
 	return Message{
 		Type: MsgTypeCommandResult,
 		Data: info,
@@ -653,11 +728,27 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 	}
 
-	files, err := util.ListFilesRecursive(fullPath)
+	// Get all files in the directory, ignoring those in the ignore list
+	allFiles, err := util.ListFilesRecursive(fullPath)
 	if err != nil {
 		return Message{
 			Type: MsgTypeError,
 			Data: fmt.Sprintf("Failed to list directory: %v", err),
+		}
+	}
+
+	var files []string
+	for _, file := range allFiles {
+		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
+		relPath = strings.TrimPrefix(relPath, "/")
+
+		fileInfo, err := os.Stat(file)
+		if err != nil || fileInfo.IsDir() {
+			continue
+		}
+
+		if !c.ignoreList.ShouldIgnore(relPath, false) {
+			files = append(files, file)
 		}
 	}
 
@@ -751,8 +842,25 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 		}
 	}
 
-	filePaths := cmd.Args
-	for _, file := range filePaths {
+	// Filter out files in the ignore list
+	var filesToSend []string
+	for _, filePath := range cmd.Args {
+		fullPath := filepath.Join(c.App.Config.Folder, filePath)
+		fileInfo, err := os.Stat(fullPath)
+
+		if err == nil && !c.ignoreList.ShouldIgnore(filePath, fileInfo.IsDir()) {
+			filesToSend = append(filesToSend, filePath)
+		}
+	}
+
+	if len(filesToSend) == 0 {
+		return Message{
+			Type: MsgTypeError,
+			Data: "All specified files are either not found or in the ignore list",
+		}
+	}
+
+	for _, file := range filesToSend {
 		getCmd := &Command{
 			Name: "GET",
 			Args: []string{file},
@@ -763,7 +871,7 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: fmt.Sprintf("Sending %d files", len(filePaths)),
+		Data: fmt.Sprintf("Sending %d files", len(filesToSend)),
 	}
 }
 
@@ -817,13 +925,45 @@ func (c *Connection) handleStatusCommand(_ *Command) Message {
 			typeStr = "Sending"
 		}
 
-		statusText += fmt.Sprintf("[%d] %s %s: %.1f%% complete (%.2f KB/s)\n",
-			t.ID, typeStr, t.Name, pct, t.Speed)
+		statusStr := "In Progress"
+		switch t.Status {
+		case TransferStatusPaused:
+			statusStr = "Paused"
+		case TransferStatusWaitingAck:
+			statusStr = "Waiting for acknowledgment"
+		case TransferStatusComplete:
+			statusStr = "Complete"
+		case TransferStatusFailed:
+			statusStr = "Failed"
+		}
+
+		statusText += fmt.Sprintf("[%d] %s %s: %.1f%% complete (%.2f KB/s) - %s\n",
+			t.ID, typeStr, t.Name, pct, t.Speed, statusStr)
 	}
 
 	return Message{
 		Type: MsgTypeCommandResult,
 		Data: statusText,
+	}
+}
+
+// createUniqueFilename creates a unique filename when a file already exists
+func createUniqueFilename(path string) string {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path
+	}
+
+	dir, file := filepath.Split(path)
+	ext := filepath.Ext(file)
+	name := file[:len(file)-len(ext)]
+
+	counter := 1
+	for {
+		newPath := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", name, counter, ext))
+		if _, err := os.Stat(newPath); os.IsNotExist(err) {
+			return newPath
+		}
+		counter++
 	}
 }
 
@@ -868,6 +1008,13 @@ func (c *Connection) handleFileStart(msg Message) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		c.SendError(fmt.Sprintf("Failed to create directory: %v", err))
 		return
+	}
+
+	// Check if file already exists and create a unique filename
+	if _, err := os.Stat(fullPath); err == nil {
+		newPath := createUniqueFilename(fullPath)
+		c.Log.Info("File already exists, using unique name: %s", filepath.Base(newPath))
+		fullPath = newPath
 	}
 
 	file, err := os.Create(fullPath)
@@ -939,6 +1086,16 @@ func (c *Connection) handleFileData(msg Message) {
 			}
 		}
 	}
+
+	// If the message has an ID, send an ACK for it to improve reliability
+	if msg.ID != "" {
+		ackMsg := Message{
+			Type: MsgTypeACK,
+			Data: transfer.Name,
+			ID:   msg.ID,
+		}
+		c.SendMessage(ackMsg)
+	}
 }
 
 func (c *Connection) handleFileEnd(msg Message) {
@@ -964,11 +1121,21 @@ func (c *Connection) handleFileEnd(msg Message) {
 		transfer.File = nil
 	}
 
+	// Always send the ACK message with the same ID as the request
 	ackMsg := Message{
 		Type: MsgTypeACK,
 		Data: filePath,
 	}
-	c.SendReliableMessage(ackMsg)
+
+	if msg.ID != "" {
+		ackMsg.ID = msg.ID
+	}
+
+	// Send multiple ACKs to increase the chance it gets through
+	for i := 0; i < 3; i++ {
+		c.SendReliableMessage(ackMsg)
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	transfer.Status = TransferStatusComplete
 	c.Log.Success("File transfer complete: %s", filePath)
@@ -1008,14 +1175,16 @@ func (c *Connection) handleAck(msg Message) {
 
 	var transfer *FileTransfer
 	for _, t := range c.App.Transfers {
-		if t.Name == filePath && t.Conn == c && t.Status == TransferStatusWaitingAck {
+		if t.Name == filePath && t.Conn == c && (t.Status == TransferStatusWaitingAck || t.Status == TransferStatusInProgress) {
 			transfer = t
 			break
 		}
 	}
 
 	if transfer != nil {
-		transfer.Status = TransferStatusComplete
-		c.Log.Success("File transfer acknowledged: %s", filePath)
+		if transfer.Status == TransferStatusWaitingAck {
+			transfer.Status = TransferStatusComplete
+			c.Log.Success("File transfer acknowledged: %s", filePath)
+		}
 	}
 }
