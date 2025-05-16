@@ -301,36 +301,39 @@ func (c *Connection) monitorPendingMessages() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		now := time.Now()
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
 
-		c.pendingMessagesMutex.Lock()
-		for id, pending := range c.pendingMessages {
-			if pending.RetryCount >= maxRetries {
-				c.Log.Error("Message %s failed after %d retries", id, maxRetries)
-				delete(c.pendingMessages, id)
-				continue
+			c.pendingMessagesMutex.Lock()
+			for id, pending := range c.pendingMessages {
+				if pending.RetryCount >= maxRetries {
+					c.Log.Error("Message %s failed after %d retries", id, maxRetries)
+					delete(c.pendingMessages, id)
+					continue
+				}
+
+				waitTime := initialWait * (1 << uint(pending.RetryCount))
+				if now.Sub(pending.LastAttempt) > waitTime {
+					msg := pending.Message.Clone()
+					msg.IncrementRetry()
+					pending.RetryCount++
+					pending.LastAttempt = now
+
+					go func(m Message) {
+						c.sendMutex.Lock()
+						data, _ := m.Marshal()
+						c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+						c.Writer.WriteString(string(data) + "\n")
+						c.Writer.Flush()
+						c.Conn.SetWriteDeadline(time.Time{})
+						c.sendMutex.Unlock()
+					}(msg)
+				}
 			}
-
-			waitTime := initialWait * (1 << uint(pending.RetryCount))
-			if now.Sub(pending.LastAttempt) > waitTime {
-				msg := pending.Message.Clone()
-				msg.IncrementRetry()
-				pending.RetryCount++
-				pending.LastAttempt = now
-
-				go func(m Message) {
-					c.sendMutex.Lock()
-					data, _ := m.Marshal()
-					c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-					c.Writer.WriteString(string(data) + "\n")
-					c.Writer.Flush()
-					c.Conn.SetWriteDeadline(time.Time{})
-					c.sendMutex.Unlock()
-				}(msg)
-			}
+			c.pendingMessagesMutex.Unlock()
 		}
-		c.pendingMessagesMutex.Unlock()
 	}
 }
 
@@ -346,6 +349,7 @@ func (c *Connection) SendReliableMessage(msg Message) error {
 	}
 
 	responseChan := make(chan Message, 1)
+	errchan := make(chan error, 1)
 
 	c.RegisterResponseHandler(msg.ID, func(resp Message) {
 		responseChan <- resp
