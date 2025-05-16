@@ -1,13 +1,9 @@
 package network
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"local-file-sharer/internal/util"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -38,9 +34,6 @@ type FileTransfer struct {
 	LastProgressTime time.Time
 	AvgSpeed         float64
 	Retries          int
-	Checksum         string
-	PauseSignal      chan bool
-	IsPaused         bool
 }
 
 func NewFileTransfer(name string, size int64, transferType string, conn *Connection) *FileTransfer {
@@ -57,7 +50,6 @@ func NewFileTransfer(name string, size int64, transferType string, conn *Connect
 		Speed:            0,
 		AvgSpeed:         0,
 		Conn:             conn,
-		PauseSignal:      make(chan bool, 1),
 	}
 }
 
@@ -106,62 +98,20 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		typeStr = "↑ Sending"
 	}
 
+	// Clear the current line and print the progress
 	fmt.Printf("\r%-70s", " ")
 	fmt.Printf("\r%s %s: %s %.1f%% (%.2f KB/s) ETA: %s",
 		typeStr, t.Name, progBar, percentage, speed, eta)
 
+	// If transfer just completed, print a completion message with a prompt
 	if percentage >= 100 && t.Status == TransferStatusComplete {
 		fmt.Printf("\n\n%sTransfer complete: %s%s\n\n> ", util.Green+util.Bold, t.Name, util.Reset)
 	}
 }
 
-func (t *FileTransfer) CalculateChecksum() (string, error) {
-	if t.File == nil {
-		return "", fmt.Errorf("file not open")
-	}
-
-	currentPos, err := t.File.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return "", err
-	}
-
-	_, err = t.File.Seek(0, io.SeekStart)
-	if err != nil {
-		return "", err
-	}
-
-	hash := sha256.New()
-	if _, err := io.Copy(hash, t.File); err != nil {
-		return "", err
-	}
-
-	_, err = t.File.Seek(currentPos, io.SeekStart)
-	if err != nil {
-		return "", err
-	}
-
-	checksum := hex.EncodeToString(hash.Sum(nil))
-	t.Checksum = checksum
-	return checksum, nil
-}
-
-func (t *FileTransfer) VerifyChecksum(expectedChecksum string) (bool, error) {
-	actualChecksum, err := t.CalculateChecksum()
-	if err != nil {
-		return false, err
-	}
-
-	return actualChecksum == expectedChecksum, nil
-}
-
 func (t *FileTransfer) Pause() {
 	if t.Status == TransferStatusInProgress {
 		t.Status = TransferStatusPaused
-		t.IsPaused = true
-		select {
-		case t.PauseSignal <- true:
-		default:
-		}
 		fmt.Printf("\n\n%sTransfer paused: %s%s\n\n> ", util.Yellow+util.Bold, t.Name, util.Reset)
 	}
 }
@@ -169,28 +119,9 @@ func (t *FileTransfer) Pause() {
 func (t *FileTransfer) Resume() {
 	if t.Status == TransferStatusPaused {
 		t.Status = TransferStatusInProgress
-		t.IsPaused = false
 		t.LastProgressTime = time.Now()
 		fmt.Printf("\n\n%sTransfer resumed: %s%s\n\n> ", util.Green+util.Bold, t.Name, util.Reset)
 	}
-}
-
-func (t *FileTransfer) ShouldIgnore() bool {
-	baseName := filepath.Base(t.Name)
-	return baseName == ".fshignore" || baseName == ".gitignore"
-}
-
-func (t *FileTransfer) WaitForPauseIfNeeded() bool {
-	if t.IsPaused {
-		fmt.Printf("\n%sWaiting for transfer to resume: %s%s\n", util.Yellow, t.Name, util.Reset)
-		for t.IsPaused {
-			time.Sleep(500 * time.Millisecond)
-			if t.Status == TransferStatusFailed {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func generateProgressBar(percentage float64, width int) string {

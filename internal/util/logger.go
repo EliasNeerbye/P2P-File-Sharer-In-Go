@@ -2,10 +2,10 @@ package util
 
 import (
 	"fmt"
-	"sync"
 	"time"
 )
 
+// ANSI color codes
 const (
 	Reset     = "\033[0m"
 	Red       = "\033[31m"
@@ -18,6 +18,7 @@ const (
 	Underline = "\033[4m"
 )
 
+// Log levels
 const (
 	LevelDebug = iota
 	LevelInfo
@@ -26,60 +27,12 @@ const (
 	LevelFatal
 )
 
-type LogMessage struct {
-	Level     int
-	Color     string
-	Message   string
-	Timestamp string
-	LevelStr  string
-	Prefix    string
-}
-
 type Logger struct {
 	verbose bool
 	prefix  string
-	mu      sync.Mutex
 }
 
-var (
-	globalLogMutex   sync.Mutex
-	terminalIsBusy   bool
-	terminalBusyLock sync.Mutex
-	pendingLogs      []LogMessage
-)
-
-func SetTerminalBusy(busy bool) {
-	terminalBusyLock.Lock()
-	defer terminalBusyLock.Unlock()
-	terminalIsBusy = busy
-
-	if !busy && len(pendingLogs) > 0 {
-		flushPendingLogs()
-	}
-}
-
-func flushPendingLogs() {
-	globalLogMutex.Lock()
-	defer globalLogMutex.Unlock()
-
-	fmt.Print("\r\033[K") // Clear the current line
-
-	for _, log := range pendingLogs {
-		fmt.Printf("%s%s [%s] %s%s: %s%s\n",
-			log.Color,
-			log.Timestamp,
-			log.LevelStr,
-			Bold,
-			log.Prefix,
-			Reset+log.Color,
-			log.Message+Reset,
-		)
-	}
-
-	pendingLogs = nil
-	fmt.Print("> ")
-}
-
+// NewLogger creates a new logger instance
 func NewLogger(verbose bool, prefix string) *Logger {
 	return &Logger{
 		verbose: verbose,
@@ -88,6 +41,7 @@ func NewLogger(verbose bool, prefix string) *Logger {
 }
 
 func (l *Logger) log(level int, color string, format string, args ...interface{}) {
+	// Skip debug messages if not in verbose mode
 	if level == LevelDebug && !l.verbose {
 		return
 	}
@@ -108,32 +62,10 @@ func (l *Logger) log(level int, color string, format string, args ...interface{}
 		levelStr = "FATAL"
 	}
 
+	// Format the message
 	message := fmt.Sprintf(format, args...)
 
-	logMsg := LogMessage{
-		Level:     level,
-		Color:     color,
-		Message:   message,
-		Timestamp: timestamp,
-		LevelStr:  levelStr,
-		Prefix:    l.prefix,
-	}
-
-	terminalBusyLock.Lock()
-	busy := terminalIsBusy
-	terminalBusyLock.Unlock()
-
-	if busy {
-		pendingLogs = append(pendingLogs, logMsg)
-		return
-	}
-
-	globalLogMutex.Lock()
-	defer globalLogMutex.Unlock()
-
-	// Clear line before printing log
-	fmt.Print("\r\033[K")
-
+	// Print the formatted log line
 	fmt.Printf("%s%s [%s] %s%s: %s%s\n",
 		color,
 		timestamp,
@@ -143,35 +75,39 @@ func (l *Logger) log(level int, color string, format string, args ...interface{}
 		Reset+color,
 		message+Reset,
 	)
-
-	// Restore prompt if needed
-	fmt.Print("> ")
 }
 
+// Debug logs debug information (only shown when verbose is true)
 func (l *Logger) Debug(format string, args ...interface{}) {
 	l.log(LevelDebug, Cyan, format, args...)
 }
 
+// Info logs general information
 func (l *Logger) Info(format string, args ...interface{}) {
 	l.log(LevelInfo, Green, format, args...)
 }
 
+// Warn logs warnings
 func (l *Logger) Warn(format string, args ...interface{}) {
 	l.log(LevelWarn, Yellow, format, args...)
 }
 
+// Error logs error messages
 func (l *Logger) Error(format string, args ...interface{}) {
 	l.log(LevelError, Red, format, args...)
 }
 
+// Fatal logs critical errors
 func (l *Logger) Fatal(format string, args ...interface{}) {
 	l.log(LevelFatal, Purple+Bold, format, args...)
 }
 
+// Success logs success messages with a green checkmark
 func (l *Logger) Success(format string, args ...interface{}) {
 	l.log(LevelInfo, Green+Bold, "✓ "+format, args...)
 }
 
+// Progress creates a simple progress message
 func (l *Logger) Progress(format string, args ...interface{}) {
 	l.log(LevelInfo, Cyan, "⟳ "+format, args...)
 }
