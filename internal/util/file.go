@@ -12,15 +12,28 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 	var absPath string
 	var err error
 
-	// Normalize the path
-	normalizedPath := NormalizePath(dirPath)
-
-	if filepath.IsAbs(normalizedPath) {
-		absPath = normalizedPath
+	// Handle default case of current directory
+	if dirPath == "" || dirPath == "." {
+		absPath = baseFolder
 	} else {
-		absPath, err = filepath.Abs(filepath.Join(baseFolder, normalizedPath))
-		if err != nil {
-			return nil, err
+		// Normalize the path
+		normalizedPath := NormalizePath(dirPath)
+
+		if filepath.IsAbs(normalizedPath) {
+			absPath = normalizedPath
+		} else {
+			// Don't use filepath.Join which could cause path doubling
+			if strings.HasSuffix(baseFolder, "/") || strings.HasSuffix(baseFolder, "\\") {
+				absPath = baseFolder + normalizedPath
+			} else {
+				absPath = baseFolder + "/" + normalizedPath
+			}
+
+			// Now convert to absolute
+			absPath, err = filepath.Abs(absPath)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 

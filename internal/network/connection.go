@@ -16,6 +16,11 @@ import (
 )
 
 func isPathSafe(requestedPath, baseFolder string) bool {
+	// Don't normalize for the empty path case ("." is always safe)
+	if requestedPath == "" || requestedPath == "." {
+		return true
+	}
+
 	// First normalize the path
 	normalizedPath := util.NormalizePath(requestedPath)
 
@@ -358,16 +363,25 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 		path = cmd.Args[0]
 	}
 
-	if !isPathSafe(path, c.App.Config.Folder) {
+	// Check for path safety without joining to base folder yet
+	if path != "." && !isPathSafe(path, c.App.Config.Folder) {
 		return Message{
 			Type: MsgTypeError,
-			Data: "Access denied: path is outside the shared folder",
+			Data: fmt.Sprintf("Access denied: path %s is outside the shared folder", path),
 		}
 	}
 
 	recursive := cmd.Name == "LSR"
 
-	fullPath := filepath.Join(c.App.Config.Folder, path)
+	var fullPath string
+	if path == "." {
+		fullPath = c.App.Config.Folder
+	} else {
+		// Use filepath.Clean to avoid duplicated segments
+		normalized := util.NormalizePath(path)
+		fullPath = filepath.Clean(filepath.Join(c.App.Config.Folder, normalized))
+	}
+
 	absPath, err := filepath.Abs(fullPath)
 	if err != nil {
 		return Message{
@@ -397,7 +411,10 @@ func (c *Connection) handleListCommand(cmd *Command) Message {
 			fileName = file[:idx]
 		}
 
-		filePath := filepath.Join(path, fileName)
+		filePath := fileName
+		if path != "." {
+			filePath = filepath.Join(path, fileName)
+		}
 		isDir := strings.HasSuffix(fileName, "/")
 
 		// Always exclude .p2pignore files
