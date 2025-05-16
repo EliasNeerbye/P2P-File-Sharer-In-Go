@@ -89,32 +89,38 @@ func (a *App) GetTransfers() []*FileTransfer {
 func (a *App) IsActiveTransferInProgress() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	
-	activeCount := 0
+
 	for _, transfer := range a.Transfers {
-		if transfer.Status == TransferStatusInProgress {
-			activeCount++
+		if transfer.Status == TransferStatusInProgress ||
+			transfer.Status == TransferStatusPaused {
+			return true
 		}
 	}
-	
-	return activeCount >= 3
+
+	return false
 }
 
 func (a *App) GetConnectionByID(id string) *Connection {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	
+
 	return a.Connections[id]
 }
 
 func (a *App) GetActiveConnections() []*Connection {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	
+
 	conns := make([]*Connection, 0, len(a.Connections))
 	for _, conn := range a.Connections {
 		conns = append(conns, conn)
 	}
-	
+
 	return conns
+}
+
+func (a *App) HasConnections() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.Connections) > 0
 }

@@ -133,7 +133,7 @@ func (c *Connection) Close() {
 	c.App.RemoveConnection(c)
 	c.Log.Info("Connection closed")
 
-	if c.isClient && !c.App.Config.DualMode {
+	if c.isClient {
 		c.Log.Error("Lost connection to server, exiting...")
 		fmt.Println("\nDisconnected from server. Press Enter to exit.")
 
@@ -159,7 +159,7 @@ func (c *Connection) SendMessage(msg Message) error {
 	if err != nil {
 		c.Log.Error("Failed to send message: %v", err)
 
-		if c.isClient && !c.App.Config.DualMode {
+		if c.isClient {
 			c.Close()
 		}
 
@@ -478,6 +478,15 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		chunksSent := 0
 
 		for {
+			if transfer.Status == TransferStatusPaused {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			if transfer.Status == TransferStatusFailed {
+				return
+			}
+
 			n, err := file.Read(buffer)
 			if err != nil && err != io.EOF {
 				transfer.Status = TransferStatusFailed
@@ -505,15 +514,17 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 				lastProgress = progress
 				lastProgressBytes = totalSent
 				elapsedTime := time.Since(startTime).Seconds()
-				speed := float64(totalSent) / elapsedTime / 1024
+				if elapsedTime > 0 {
+					speed := float64(totalSent) / elapsedTime / 1024
 
-				progMsg := Message{
-					Type: MsgTypeProgress,
-					Data: fmt.Sprintf("%s|%d|%d|%.2f", filePath, totalSent, info.Size(), speed),
+					progMsg := Message{
+						Type: MsgTypeProgress,
+						Data: fmt.Sprintf("%s|%d|%d|%.2f", filePath, totalSent, info.Size(), speed),
+					}
+					c.SendMessage(progMsg)
+
+					transfer.UpdateProgress(totalSent, speed)
 				}
-				c.SendMessage(progMsg)
-
-				transfer.UpdateProgress(totalSent, speed)
 			}
 
 			if chunksSent%20 == 0 {
@@ -570,13 +581,21 @@ func (c *Connection) handlePutCommand(cmd *Command) Message {
 		}
 	}
 
+	filePath := cmd.Args[0]
+	if !util.IsValidRelativePath(filePath) {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Invalid path: path contains invalid characters or points to a parent directory",
+		}
+	}
+
 	return Message{
 		Type: MsgTypeCommandResult,
 		Data: "Ready to receive file",
 	}
 }
 
-func (c *Connection) handleInfoCommand(cmd *Command) Message {
+func (c *Connection) handleInfoCommand(_ *Command) Message {
 	info := fmt.Sprintf("Node: %s\n", c.Name)
 	info += fmt.Sprintf("Folder: %s\n", c.App.Config.Folder)
 	info += fmt.Sprintf("Read-only: %t\n", c.App.Config.ReadOnly)
@@ -663,7 +682,7 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 		c.handleGetCommand(getCmd)
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	return Message{
@@ -680,7 +699,15 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 		}
 	}
 
-	if !isPathSafe(cmd.Args[0], c.App.Config.Folder) {
+	dirPath := cmd.Args[0]
+	if !util.IsValidRelativePath(dirPath) {
+		return Message{
+			Type: MsgTypeError,
+			Data: "Invalid path: path contains invalid characters or points to a parent directory",
+		}
+	}
+
+	if !isPathSafe(dirPath, c.App.Config.Folder) {
 		return Message{
 			Type: MsgTypeError,
 			Data: "Access denied: path is outside the shared folder",
@@ -694,7 +721,6 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 		}
 	}
 
-	dirPath := cmd.Args[0]
 	fullPath := filepath.Join(c.App.Config.Folder, dirPath)
 
 	if err := os.MkdirAll(fullPath, 0755); err != nil {
@@ -714,11 +740,9 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
 		return Message{
 			Type: MsgTypeError,
-			Data: "GETM requires a file pattern",
+			Data: "GETM requires at least one file",
 		}
 	}
-
-	pattern := cmd.Args[0]
 
 	if c.App.Config.ReadOnly {
 		return Message{
@@ -727,44 +751,19 @@ func (c *Connection) handleGetMultipleCommand(cmd *Command) Message {
 		}
 	}
 
-	matches, err := util.FindMatchingFiles(c.App.Config.Folder, pattern)
-	if err != nil {
-		return Message{
-			Type: MsgTypeError,
-			Data: fmt.Sprintf("Failed to find matching files: %v", err),
-		}
-	}
-
-	if len(matches) == 0 {
-		return Message{
-			Type: MsgTypeError,
-			Data: "No files match the pattern",
-		}
-	}
-
-	listMsg := Message{
-		Type: MsgTypeCommandResult,
-		Data: fmt.Sprintf("Found %d files matching pattern %s:\n%s",
-			len(matches), pattern, strings.Join(matches, "\n")),
-	}
-	c.SendMessage(listMsg)
-
-	for _, file := range matches {
-		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
-		relPath = strings.TrimPrefix(relPath, "/")
-
+	filePaths := cmd.Args
+	for _, file := range filePaths {
 		getCmd := &Command{
 			Name: "GET",
-			Args: []string{relPath},
+			Args: []string{file},
 		}
 		c.handleGetCommand(getCmd)
-
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	return Message{
 		Type: MsgTypeCommandResult,
-		Data: fmt.Sprintf("Sending %d files matching pattern: %s", len(matches), pattern),
+		Data: fmt.Sprintf("Sending %d files", len(filePaths)),
 	}
 }
 
@@ -772,7 +771,7 @@ func (c *Connection) handlePutMultipleCommand(cmd *Command) Message {
 	if len(cmd.Args) < 1 {
 		return Message{
 			Type: MsgTypeError,
-			Data: "PUTM requires a file pattern",
+			Data: "PUTM requires at least one file",
 		}
 	}
 
@@ -783,13 +782,22 @@ func (c *Connection) handlePutMultipleCommand(cmd *Command) Message {
 		}
 	}
 
+	for _, file := range cmd.Args {
+		if !util.IsValidRelativePath(file) {
+			return Message{
+				Type: MsgTypeError,
+				Data: fmt.Sprintf("Invalid path: %s", file),
+			}
+		}
+	}
+
 	return Message{
 		Type: MsgTypeCommandResult,
 		Data: "Ready to receive multiple files",
 	}
 }
 
-func (c *Connection) handleStatusCommand(cmd *Command) Message {
+func (c *Connection) handleStatusCommand(_ *Command) Message {
 	transfers := c.App.GetCurrentTransfers()
 
 	if len(transfers) == 0 {
@@ -827,6 +835,11 @@ func (c *Connection) handleFileStart(msg Message) {
 	}
 
 	filePath := parts[0]
+
+	if !util.IsValidRelativePath(filePath) {
+		c.SendError("Invalid path: path contains invalid characters or points to a parent directory")
+		return
+	}
 
 	if !isPathSafe(filePath, c.App.Config.Folder) {
 		c.SendError("Access denied: path is outside the shared folder")
@@ -886,6 +899,10 @@ func (c *Connection) handleFileData(msg Message) {
 		return
 	}
 
+	if transfer.Status == TransferStatusPaused {
+		return
+	}
+
 	if transfer.File == nil {
 		c.SendError("File not open for writing")
 		return
@@ -914,8 +931,12 @@ func (c *Connection) handleFileData(msg Message) {
 	if transfer.TotalSize > 0 {
 		progress := (transfer.BytesTransferred * 100) / transfer.TotalSize
 		if progress > transfer.LastProgress+4 {
-			transfer.LastProgress = progress
-			transfer.UpdateProgress(transfer.BytesTransferred, transfer.Speed)
+			elapsedTime := time.Since(transfer.StartTime).Seconds()
+			if elapsedTime > 0 {
+				speed := float64(transfer.BytesTransferred) / elapsedTime / 1024
+				transfer.LastProgress = progress
+				transfer.UpdateProgress(transfer.BytesTransferred, speed)
+			}
 		}
 	}
 }

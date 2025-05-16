@@ -16,7 +16,6 @@ type Config struct {
 	MaxSize    int
 	Verify     bool
 	Verbose    bool
-	DualMode   bool
 }
 
 func Load() *Config {
@@ -35,7 +34,6 @@ func Load() *Config {
 	flag.IntVar(&cfg.MaxSize, "maxsize", 0, "Maximum file size in MB allowed for transfer (0 = unlimited)")
 	flag.BoolVar(&cfg.Verify, "verify", true, "Enables checksum verification to ensure file integrity")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enables detailed logging for debugging")
-	flag.BoolVar(&cfg.DualMode, "dual", false, "Run as both client and server")
 
 	flag.Parse()
 

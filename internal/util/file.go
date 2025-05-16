@@ -11,7 +11,7 @@ import (
 func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 	var absPath string
 	var err error
-	
+
 	if filepath.IsAbs(dirPath) {
 		absPath = dirPath
 	} else {
@@ -49,7 +49,7 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		
+
 		if entry.IsDir() {
 			files = append(files, name+"/")
 		} else {
@@ -64,7 +64,7 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 
 		if recursive && entry.IsDir() {
 			subDir := filepath.Join(absPath, name)
-			
+
 			subFiles, err := ListFiles(subDir, baseFolder, recursive)
 			if err != nil {
 				continue
@@ -176,22 +176,46 @@ func ResolvePath(path, baseDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve base directory: %v", err)
 	}
-	
+
 	var absPath string
 	if filepath.IsAbs(path) {
 		absPath = path
 	} else {
 		absPath = filepath.Join(absBase, path)
 	}
-	
+
 	absPath, err = filepath.Abs(absPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path: %v", err)
 	}
-	
+
 	if !strings.HasPrefix(absPath, absBase) {
 		return "", fmt.Errorf("access denied: path is outside the shared folder")
 	}
-	
+
 	return absPath, nil
+}
+
+func IsValidRelativePath(path string) bool {
+	if path == "" {
+		return false
+	}
+
+	if strings.Contains(path, "..") {
+		return false
+	}
+
+	if strings.Contains(path, "\\") {
+		return false
+	}
+
+	if strings.HasPrefix(path, "/") {
+		return false
+	}
+
+	if strings.Contains(path, ":") {
+		return false
+	}
+
+	return true
 }

@@ -23,7 +23,5 @@ func StartDial(app *App) {
 
 	go connection.Start()
 
-	if !app.Config.DualMode {
-		StartCommandInterface(app)
-	}
+	StartCommandInterface(app)
 }

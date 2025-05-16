@@ -64,6 +64,16 @@ func StartCommandInterface(app *App) {
 			continue
 		}
 
+		if app.IsActiveTransferInProgress() {
+			fmt.Println("Cannot execute commands while transfers are in progress.")
+			continue
+		}
+
+		if !app.HasConnections() && !strings.EqualFold(input, "exit") && !strings.EqualFold(input, "quit") {
+			fmt.Println("No active connections. Only EXIT or QUIT commands are available.")
+			continue
+		}
+
 		if err := parser.Execute(input); err != nil {
 			log.Error("Command failed: %v", err)
 		}
@@ -210,7 +220,7 @@ func (p *CommandParser) handleCD(args []string) error {
 		if !strings.HasPrefix(parentDir, baseFolder) {
 			return fmt.Errorf("access denied: path is outside the shared folder")
 		}
-		
+
 		p.App.Config.Folder = parentDir
 		return nil
 	}
@@ -282,8 +292,8 @@ Available Commands:
     PUT <file>         - Upload a file to remote peer
     GETDIR [dir]       - Download a directory from remote peer (current dir if omitted)
     PUTDIR [dir]       - Upload a directory to remote peer (current dir if omitted)
-    GETM <pattern>     - Download multiple files matching pattern
-    PUTM <pattern>     - Upload multiple files matching pattern
+    GETM <file1> <file2> ... - Download multiple files
+    PUTM <file1> <file2> ... - Upload multiple files
     STATUS             - Show active transfers
     MSG <message>      - Send a message to the remote peer
     
@@ -330,7 +340,12 @@ func (p *CommandParser) handleGet(args []string) error {
 		return fmt.Errorf("GET requires a file path")
 	}
 
-	_, err := p.executeRemoteCommand("GET", args[0])
+	filePath := args[0]
+	if !util.IsValidRelativePath(filePath) {
+		return fmt.Errorf("invalid path: %s", filePath)
+	}
+
+	_, err := p.executeRemoteCommand("GET", filePath)
 	return err
 }
 
@@ -353,7 +368,7 @@ func (p *CommandParser) handlePut(args []string) error {
 
 	if fileInfo.IsDir() {
 		return fmt.Errorf("this is a dir, not a file")
-	} 
+	}
 
 	relPath, err := filepath.Rel(p.App.Config.Folder, resolvedPath)
 	if err != nil {
@@ -386,6 +401,10 @@ func (p *CommandParser) handleGetDir(args []string) error {
 	path := "."
 	if len(args) > 0 {
 		path = args[0]
+	}
+
+	if !util.IsValidRelativePath(path) {
+		return fmt.Errorf("invalid path: %s", path)
 	}
 
 	_, err := p.executeRemoteCommand("GETDIR", path)
@@ -441,51 +460,82 @@ func (p *CommandParser) handlePutDir(args []string) error {
 
 func (p *CommandParser) handleGetMultiple(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("GETM requires a file pattern")
+		return fmt.Errorf("GETM requires at least one file")
 	}
 
-	_, err := p.executeRemoteCommand("GETM", args[0])
-	return err
+	for _, file := range args {
+		if !util.IsValidRelativePath(file) {
+			return fmt.Errorf("invalid path: %s", file)
+		}
+	}
+
+	conn := p.getFirstConnection()
+	if conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+
+	for _, file := range args {
+		result, err := p.executeRemoteCommand("GET", file)
+		if err != nil {
+			fmt.Printf("Failed to get file %s: %v\n", file, err)
+			continue
+		}
+
+		if strings.Contains(result, "Starting file transfer") {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	return nil
 }
 
 func (p *CommandParser) handlePutMultiple(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("PUTM requires a file pattern")
+		return fmt.Errorf("PUTM requires at least one file")
 	}
 
-	pattern := args[0]
-
-	matches, err := p.executeLocalCommand("FINDM", pattern)
-	if err != nil {
-		return err
+	conn := p.getFirstConnection()
+	if conn == nil {
+		return fmt.Errorf("no active connection")
 	}
 
-	if matches == "" {
-		return fmt.Errorf("no files match the pattern")
-	}
-
-	result, err := p.executeRemoteCommand("PUTM", pattern)
-	if err != nil {
-		return err
-	}
-
-	if strings.Contains(result, "Ready to receive") {
-		conn := p.getFirstConnection()
-		if conn == nil {
-			return fmt.Errorf("no active connection")
+	for _, filePath := range args {
+		resolvedPath, err := util.ResolvePath(filePath, p.App.Config.Folder)
+		if err != nil {
+			fmt.Printf("Failed to resolve path for %s: %v\n", filePath, err)
+			continue
 		}
 
-		for _, file := range strings.Split(matches, "\n") {
-			if file == "" {
-				continue
-			}
+		fileInfo, err := os.Stat(resolvedPath)
+		if err != nil {
+			fmt.Printf("File not found: %s\n", filePath)
+			continue
+		}
 
-			fileCmd := &Command{
+		if fileInfo.IsDir() {
+			fmt.Printf("%s is a directory, skipping\n", filePath)
+			continue
+		}
+
+		relPath, err := filepath.Rel(p.App.Config.Folder, resolvedPath)
+		if err != nil {
+			fmt.Printf("Failed to get relative path for %s: %v\n", filePath, err)
+			continue
+		}
+
+		result, err := p.executeRemoteCommand("PUT", relPath)
+		if err != nil {
+			fmt.Printf("Failed to put file %s: %v\n", relPath, err)
+			continue
+		}
+
+		if strings.Contains(result, "Ready to receive") {
+			getCmd := &Command{
 				Name: "GET",
-				Args: []string{file},
+				Args: []string{relPath},
 			}
 
-			conn.handleGetCommand(fileCmd)
+			conn.handleGetCommand(getCmd)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
@@ -495,12 +545,12 @@ func (p *CommandParser) handlePutMultiple(args []string) error {
 
 func (p *CommandParser) handleStatus() error {
 	transfers := p.App.GetCurrentTransfers()
-	
+
 	if len(transfers) == 0 {
 		fmt.Println("No active transfers")
 		return nil
 	}
-	
+
 	fmt.Printf("Active transfers: %d\n", len(transfers))
 	for _, t := range transfers {
 		pct := float64(t.BytesTransferred) / float64(t.TotalSize) * 100
@@ -508,7 +558,7 @@ func (p *CommandParser) handleStatus() error {
 		if t.Type == TransferTypeSend {
 			typeStr = "Sending"
 		}
-		
+
 		statusStr := "In Progress"
 		switch t.Status {
 		case TransferStatusPaused:
@@ -520,11 +570,11 @@ func (p *CommandParser) handleStatus() error {
 		case TransferStatusFailed:
 			statusStr = "Failed"
 		}
-		
+
 		fmt.Printf("[%d] %s %s: %.1f%% complete (%.2f KB/s) - %s\n",
 			t.ID, typeStr, t.Name, pct, t.Speed, statusStr)
 	}
-	
+
 	return nil
 }
 
@@ -634,40 +684,6 @@ func (p *CommandParser) handleCancelTransfer(args []string) error {
 	}
 
 	return nil
-}
-
-func (p *CommandParser) executeLocalCommand(cmdName string, args ...string) (string, error) {
-	switch cmdName {
-	case "LS":
-		path := "."
-		if len(args) > 0 {
-			path = args[0]
-		}
-
-		resolvedPath, err := util.ResolvePath(path, p.App.Config.Folder)
-		if err != nil {
-			return "", err
-		}
-
-		files, err := util.ListFiles(resolvedPath, p.App.Config.Folder, false)
-		if err != nil {
-			return "", err
-		}
-
-		return strings.Join(files, "\n"), nil
-		
-	case "FINDM":
-		pattern := args[0]
-		matches, err := util.FindMatchingFiles(p.App.Config.Folder, pattern)
-		if err != nil {
-			return "", err
-		}
-
-		return strings.Join(matches, "\n"), nil
-		
-	default:
-		return "", fmt.Errorf("unknown local command: %s", cmdName)
-	}
 }
 
 type MessageHandler func(messageStr string)
