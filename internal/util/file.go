@@ -12,10 +12,13 @@ func ListFiles(dirPath, baseFolder string, recursive bool) ([]string, error) {
 	var absPath string
 	var err error
 
-	if filepath.IsAbs(dirPath) {
-		absPath = dirPath
+	// Normalize the path
+	normalizedPath := NormalizePath(dirPath)
+
+	if filepath.IsAbs(normalizedPath) {
+		absPath = normalizedPath
 	} else {
-		absPath, err = filepath.Abs(filepath.Join(baseFolder, dirPath))
+		absPath, err = filepath.Abs(filepath.Join(baseFolder, normalizedPath))
 		if err != nil {
 			return nil, err
 		}
@@ -117,12 +120,15 @@ func ListFilesRecursive(dirPath string) ([]string, error) {
 func FindMatchingFiles(baseFolder, pattern string) ([]string, error) {
 	var matches []string
 
-	dir := filepath.Dir(pattern)
+	// Normalize the pattern
+	normalizedPattern := NormalizePath(pattern)
+
+	dir := filepath.Dir(normalizedPattern)
 	if dir == "." {
 		dir = ""
 	}
 
-	filePattern := filepath.Base(pattern)
+	filePattern := filepath.Base(normalizedPattern)
 
 	fullDirPath := filepath.Join(baseFolder, dir)
 
@@ -143,6 +149,9 @@ func FindMatchingFiles(baseFolder, pattern string) ([]string, error) {
 		if err != nil {
 			return err
 		}
+
+		// Normalize the relative path
+		relPath = NormalizePath(relPath)
 
 		match, err := filepath.Match(filePattern, filepath.Base(path))
 		if err != nil {
@@ -172,16 +181,19 @@ func ParseFloat64(s string) (float64, error) {
 }
 
 func ResolvePath(path, baseDir string) (string, error) {
+	// Normalize the input path
+	normalizedPath := NormalizePath(path)
+
 	absBase, err := filepath.Abs(baseDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve base directory: %v", err)
 	}
 
 	var absPath string
-	if filepath.IsAbs(path) {
-		absPath = path
+	if filepath.IsAbs(normalizedPath) {
+		absPath = normalizedPath
 	} else {
-		absPath = filepath.Join(absBase, path)
+		absPath = filepath.Join(absBase, normalizedPath)
 	}
 
 	absPath, err = filepath.Abs(absPath)
@@ -196,30 +208,6 @@ func ResolvePath(path, baseDir string) (string, error) {
 	return absPath, nil
 }
 
-func IsValidRelativePath(path string) bool {
-	if path == "" {
-		return false
-	}
-
-	if strings.Contains(path, "..") {
-		return false
-	}
-
-	if strings.Contains(path, "\\") {
-		return false
-	}
-
-	if strings.HasPrefix(path, "/") {
-		return false
-	}
-
-	if strings.Contains(path, ":") {
-		return false
-	}
-
-	return true
-}
-
 // FilterIgnoredFiles filters out files that match patterns in the ignore list
 func FilterIgnoredFiles(files []string, baseDir string, ignoreList *IgnoreList) []string {
 	if ignoreList == nil || len(ignoreList.Patterns) == 0 {
@@ -228,7 +216,9 @@ func FilterIgnoredFiles(files []string, baseDir string, ignoreList *IgnoreList) 
 
 	var filtered []string
 	for _, file := range files {
-		isDir := strings.HasSuffix(file, "/")
+		// Normalize the path
+		normalizedPath := NormalizePath(file)
+		isDir := strings.HasSuffix(normalizedPath, "/")
 
 		relPath, err := filepath.Rel(baseDir, file)
 		if err != nil {
@@ -236,6 +226,9 @@ func FilterIgnoredFiles(files []string, baseDir string, ignoreList *IgnoreList) 
 			filtered = append(filtered, file)
 			continue
 		}
+
+		// Normalize the relative path
+		relPath = NormalizePath(relPath)
 
 		if !ignoreList.ShouldIgnore(relPath, isDir) {
 			filtered = append(filtered, file)

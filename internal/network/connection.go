@@ -16,12 +16,15 @@ import (
 )
 
 func isPathSafe(requestedPath, baseFolder string) bool {
+	// First normalize the path
+	normalizedPath := util.NormalizePath(requestedPath)
+
 	absBase, err := filepath.Abs(baseFolder)
 	if err != nil {
 		return false
 	}
 
-	targetPath := filepath.Join(baseFolder, requestedPath)
+	targetPath := filepath.Join(baseFolder, normalizedPath)
 	absTarget, err := filepath.Abs(targetPath)
 	if err != nil {
 		return false
@@ -457,7 +460,15 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		}
 	}
 
-	filePath := cmd.Args[0]
+	// Normalize the file path
+	filePath := util.NormalizePath(cmd.Args[0])
+
+	if !util.IsValidRelativePath(filePath) {
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Invalid path: %s (contains invalid characters or points to a parent directory)", filePath),
+		}
+	}
 
 	if !isPathSafe(filePath, c.App.Config.Folder) {
 		return Message{
@@ -742,7 +753,15 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 	}
 
-	dirPath := cmd.Args[0]
+	// Normalize the directory path
+	dirPath := util.NormalizePath(cmd.Args[0])
+
+	if !util.IsValidRelativePath(dirPath) {
+		return Message{
+			Type: MsgTypeError,
+			Data: fmt.Sprintf("Invalid path: %s (contains invalid characters or points to a parent directory)", dirPath),
+		}
+	}
 
 	if !isPathSafe(dirPath, c.App.Config.Folder) {
 		return Message{
@@ -791,6 +810,10 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 	for _, file := range allFiles {
 		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
 		relPath = strings.TrimPrefix(relPath, "/")
+		relPath = strings.TrimPrefix(relPath, "\\") // Also trim backslashes
+
+		// Normalize the path to ensure consistency
+		relPath = util.NormalizePath(relPath)
 
 		fileInfo, err := os.Stat(file)
 		if err != nil || fileInfo.IsDir() {
@@ -820,6 +843,8 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 	for _, file := range files {
 		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
 		relPath = strings.TrimPrefix(relPath, "/")
+		relPath = strings.TrimPrefix(relPath, "\\")
+		relPath = util.NormalizePath(relPath) // Normalize
 		includedFilesList = append(includedFilesList, relPath)
 	}
 
@@ -832,6 +857,8 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 	for _, file := range files {
 		relPath := strings.TrimPrefix(file, c.App.Config.Folder)
 		relPath = strings.TrimPrefix(relPath, "/")
+		relPath = strings.TrimPrefix(relPath, "\\")
+		relPath = util.NormalizePath(relPath) // Normalize
 
 		info, err := os.Stat(file)
 		if err != nil || info.IsDir() {
@@ -844,6 +871,7 @@ func (c *Connection) handleGetDirCommand(cmd *Command) Message {
 		}
 		c.handleGetCommand(getCmd)
 
+		// Add a slight delay between file transfers
 		time.Sleep(500 * time.Millisecond)
 	}
 
@@ -861,11 +889,13 @@ func (c *Connection) handlePutDirCommand(cmd *Command) Message {
 		}
 	}
 
-	dirPath := cmd.Args[0]
+	// Normalize the directory path
+	dirPath := util.NormalizePath(cmd.Args[0])
+
 	if !util.IsValidRelativePath(dirPath) {
 		return Message{
 			Type: MsgTypeError,
-			Data: "Invalid path: path contains invalid characters or points to a parent directory",
+			Data: fmt.Sprintf("Invalid path: %s (contains invalid characters or points to a parent directory)", dirPath),
 		}
 	}
 
@@ -1120,22 +1150,8 @@ func (c *Connection) handleStatusCommand(_ *Command) Message {
 
 // createUniqueFilename creates a unique filename when a file already exists
 func createUniqueFilename(path string) string {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return path
-	}
-
-	dir, file := filepath.Split(path)
-	ext := filepath.Ext(file)
-	name := file[:len(file)-len(ext)]
-
-	counter := 1
-	for {
-		newPath := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", name, counter, ext))
-		if _, err := os.Stat(newPath); os.IsNotExist(err) {
-			return newPath
-		}
-		counter++
-	}
+	// Use the utility function from file.go
+	return util.EnsureUniqueFilename(path)
 }
 
 func (c *Connection) handleFileStart(msg Message) {
@@ -1145,10 +1161,11 @@ func (c *Connection) handleFileStart(msg Message) {
 		return
 	}
 
-	filePath := parts[0]
+	// Normalize the file path to handle backslashes
+	filePath := util.NormalizePath(parts[0])
 
 	if !util.IsValidRelativePath(filePath) {
-		c.SendError("Invalid path: path contains invalid characters or points to a parent directory")
+		c.SendError(fmt.Sprintf("Invalid path: %s (contains invalid characters or points to a parent directory)", filePath))
 		return
 	}
 
@@ -1170,6 +1187,12 @@ func (c *Connection) handleFileStart(msg Message) {
 
 	if c.App.Config.WriteOnly {
 		c.SendError("This node is in write-only mode and cannot receive files")
+		return
+	}
+
+	// Explicitly prevent receiving .p2pignore files
+	if filepath.Base(filePath) == ".p2pignore" {
+		c.SendError("The .p2pignore file cannot be transferred")
 		return
 	}
 
@@ -1270,13 +1293,16 @@ func (c *Connection) handleFileData(msg Message) {
 }
 
 func (c *Connection) handleFileEnd(msg Message) {
-	filePath := msg.Data
+	// Normalize the file path
+	filePath := util.NormalizePath(msg.Data)
 
 	transfers := c.App.GetTransfers()
 	var transfer *FileTransfer
 
 	for _, t := range transfers {
-		if t.Conn == c && t.Type == TransferTypeReceive && t.Name == filePath {
+		// Compare with normalized paths
+		if t.Conn == c && t.Type == TransferTypeReceive &&
+			(t.Name == filePath || util.NormalizePath(t.Name) == filePath) {
 			transfer = t
 			break
 		}
@@ -1303,7 +1329,7 @@ func (c *Connection) handleFileEnd(msg Message) {
 	}
 
 	// Send multiple ACKs to increase the chance it gets through
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 5; i++ {
 		c.SendReliableMessage(ackMsg)
 		time.Sleep(100 * time.Millisecond)
 	}
