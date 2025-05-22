@@ -14,15 +14,14 @@ type IgnorePattern struct {
 
 type IgnoreList struct {
 	Patterns []IgnorePattern
-	RawLines []string 
+	RawLines []string
 }
 
 func LoadIgnoreFile(baseFolder string) (*IgnoreList, error) {
 	ignoreFile := filepath.Join(baseFolder, ".p2pignore")
 
-	
 	if _, err := os.Stat(ignoreFile); os.IsNotExist(err) {
-		
+
 		return &IgnoreList{
 			Patterns: []IgnorePattern{},
 			RawLines: []string{},
@@ -44,15 +43,12 @@ func LoadIgnoreFile(baseFolder string) (*IgnoreList, error) {
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
-		
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		
 		ignoreList.RawLines = append(ignoreList.RawLines, line)
 
-		
 		isDir := strings.HasSuffix(line, "/")
 		if isDir {
 			line = line[:len(line)-1]
@@ -72,7 +68,6 @@ func (il *IgnoreList) ShouldIgnore(path string, isDir bool) bool {
 		return false
 	}
 
-	
 	filename := filepath.Base(path)
 	if filename == ".p2pignore" {
 		return true
@@ -82,9 +77,8 @@ func (il *IgnoreList) ShouldIgnore(path string, isDir bool) bool {
 		return false
 	}
 
-	
 	for _, pattern := range il.Patterns {
-		
+
 		if pattern.Pattern == filename {
 			return true
 		}
@@ -92,31 +86,27 @@ func (il *IgnoreList) ShouldIgnore(path string, isDir bool) bool {
 
 	normalizedPath := filepath.ToSlash(path)
 	for _, pattern := range il.Patterns {
-		
+
 		if pattern.IsDir && !isDir {
 			continue
 		}
 
-		
 		if pattern.Pattern == normalizedPath {
 			return true
 		}
 
-		
 		if strings.Contains(pattern.Pattern, "*") || strings.Contains(pattern.Pattern, "?") {
-			
+
 			matched, err := filepath.Match(pattern.Pattern, normalizedPath)
 			if err == nil && matched {
 				return true
 			}
 
-			
 			matched, err = filepath.Match(pattern.Pattern, filename)
 			if err == nil && matched {
 				return true
 			}
 
-			
 			pathParts := strings.Split(normalizedPath, "/")
 			for _, part := range pathParts {
 				matched, err := filepath.Match(pattern.Pattern, part)
@@ -126,14 +116,12 @@ func (il *IgnoreList) ShouldIgnore(path string, isDir bool) bool {
 			}
 		}
 
-		
 		if pattern.IsDir && strings.HasPrefix(normalizedPath, pattern.Pattern+"/") {
 			return true
 		}
 
-		
 		if strings.HasPrefix(pattern.Pattern, "*.") {
-			ext := pattern.Pattern[1:] 
+			ext := pattern.Pattern[1:]
 			if strings.HasSuffix(filename, ext) {
 				return true
 			}
