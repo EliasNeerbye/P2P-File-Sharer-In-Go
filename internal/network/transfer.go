@@ -31,9 +31,10 @@ type FileTransfer struct {
 	File             *os.File
 	LastProgress     int64
 	LastProgressTime time.Time
-	AvgSpeed         float64
+	LastSpeedUpdate  time.Time
 	Retries          int
 	AckIDs           map[string]bool
+	LastBytes        int64
 }
 
 func NewFileTransfer(name string, size int64, transferType string, conn *Connection) *FileTransfer {
@@ -47,39 +48,43 @@ func NewFileTransfer(name string, size int64, transferType string, conn *Connect
 		StartTime:        now,
 		LastUpdate:       now,
 		LastProgressTime: now,
+		LastSpeedUpdate:  now,
 		Speed:            0,
-		AvgSpeed:         0,
 		Conn:             conn,
 		AckIDs:           make(map[string]bool),
+		LastBytes:        0,
 	}
 }
 
-func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
+func (t *FileTransfer) UpdateProgress(bytesTransferred int64, calculatedSpeed float64) {
 	now := time.Now()
-	elapsed := now.Sub(t.LastProgressTime).Seconds()
-
-	if elapsed > 0 && t.LastProgressTime != t.StartTime {
-		currentSpeed := float64(bytesTransferred-t.BytesTransferred) / elapsed / 1024
-		if t.AvgSpeed == 0 {
-			t.AvgSpeed = currentSpeed
-		} else {
-
-			t.AvgSpeed = 0.7*t.AvgSpeed + 0.3*currentSpeed
-		}
-
-		if speed <= 0.01 && t.AvgSpeed > 0 {
-			speed = t.AvgSpeed
-		}
-	}
-
-	if speed < 0.01 && bytesTransferred > 0 {
-		speed = 0.01
-	}
 
 	t.BytesTransferred = bytesTransferred
-	t.Speed = speed
 	t.LastUpdate = now
-	t.LastProgressTime = now
+
+	elapsed := now.Sub(t.LastSpeedUpdate).Seconds()
+
+	if elapsed >= 1.0 {
+		bytesThisInterval := bytesTransferred - t.LastBytes
+		currentSpeed := float64(bytesThisInterval) / elapsed / 1024
+
+		if currentSpeed < 0 {
+			currentSpeed = 0
+		}
+
+		if t.Speed == 0 {
+			t.Speed = currentSpeed
+		} else {
+			t.Speed = 0.8*t.Speed + 0.2*currentSpeed
+		}
+
+		t.LastSpeedUpdate = now
+		t.LastBytes = bytesTransferred
+	}
+
+	if calculatedSpeed > 0 && t.Speed == 0 {
+		t.Speed = calculatedSpeed
+	}
 
 	var percentage float64
 	if t.TotalSize > 0 {
@@ -87,24 +92,21 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 	}
 
 	var eta string
-	if speed > 0 {
+	if t.Speed > 0.01 && t.TotalSize > t.BytesTransferred {
 		remainingBytes := t.TotalSize - t.BytesTransferred
-		remainingSeconds := int(float64(remainingBytes) / (speed * 1024))
+		remainingSeconds := int(float64(remainingBytes) / (t.Speed * 1024))
 
-		if remainingSeconds > 0 {
-			if remainingSeconds < 60 {
-				eta = fmt.Sprintf("%ds", remainingSeconds)
-			} else if remainingSeconds < 3600 {
-				eta = fmt.Sprintf("%dm %ds", remainingSeconds/60, remainingSeconds%60)
-			} else {
-				eta = fmt.Sprintf("%dh %dm", remainingSeconds/3600, (remainingSeconds%3600)/60)
-			}
-		} else {
+		if remainingSeconds <= 0 {
 			eta = "0s"
+		} else if remainingSeconds < 60 {
+			eta = fmt.Sprintf("%ds", remainingSeconds)
+		} else if remainingSeconds < 3600 {
+			eta = fmt.Sprintf("%dm %ds", remainingSeconds/60, remainingSeconds%60)
+		} else {
+			eta = fmt.Sprintf("%dh %dm", remainingSeconds/3600, (remainingSeconds%3600)/60)
 		}
 	} else {
-
-		if t.BytesTransferred > 0 && t.BytesTransferred >= t.TotalSize*9/10 {
+		if percentage >= 99.0 {
 			eta = "0s"
 		} else {
 			eta = "calculating..."
@@ -117,9 +119,14 @@ func (t *FileTransfer) UpdateProgress(bytesTransferred int64, speed float64) {
 		typeStr = "↑ Sending"
 	}
 
-	fmt.Printf("\r%-70s", " ")
+	displaySpeed := t.Speed
+	if displaySpeed < 0.01 {
+		displaySpeed = 0.01
+	}
+
+	fmt.Printf("\r%-90s", " ")
 	fmt.Printf("\r%s %s: %s %.1f%% (%.2f KB/s) ETA: %s",
-		typeStr, t.Name, progBar, percentage, speed, eta)
+		typeStr, t.Name, progBar, percentage, displaySpeed, eta)
 }
 
 func (t *FileTransfer) Pause() {
@@ -133,6 +140,7 @@ func (t *FileTransfer) Resume() {
 	if t.Status == TransferStatusPaused {
 		t.Status = TransferStatusInProgress
 		t.LastProgressTime = time.Now()
+		t.LastSpeedUpdate = time.Now()
 		fmt.Printf("\nTransfer resumed: %s\n", t.Name)
 	}
 }
@@ -170,7 +178,7 @@ func generateProgressBar(percentage float64, width int) string {
 	for i := 0; i < width; i++ {
 		if i < filled {
 			bar += "="
-		} else if i == filled {
+		} else if i == filled && percentage < 100 {
 			bar += ">"
 		} else {
 			bar += " "

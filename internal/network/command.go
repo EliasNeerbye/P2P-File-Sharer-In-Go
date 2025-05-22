@@ -571,7 +571,11 @@ func (p *CommandParser) handleGetMultiple(args []string) error {
 		return fmt.Errorf("no active connection")
 	}
 
-	for _, file := range args {
+	fmt.Printf("Starting sequential download of %d files...\n", len(args))
+
+	for i, file := range args {
+		fmt.Printf("Downloading file %d of %d: %s\n", i+1, len(args), file)
+
 		result, err := p.executeRemoteCommand("GET", file)
 		if err != nil {
 			fmt.Printf("Failed to get file %s: %v\n", file, err)
@@ -579,10 +583,13 @@ func (p *CommandParser) handleGetMultiple(args []string) error {
 		}
 
 		if strings.Contains(result, "Starting file transfer") {
-			time.Sleep(100 * time.Millisecond)
+			for p.App.IsActiveTransferInProgress() {
+				time.Sleep(500 * time.Millisecond)
+			}
 		}
 	}
 
+	fmt.Println("Sequential download completed.")
 	return nil
 }
 
@@ -596,7 +603,10 @@ func (p *CommandParser) handlePutMultiple(args []string) error {
 		return fmt.Errorf("no active connection")
 	}
 
-	for _, filePath := range args {
+	fmt.Printf("Starting sequential upload of %d files...\n", len(args))
+
+	for i, filePath := range args {
+		fmt.Printf("Uploading file %d of %d: %s\n", i+1, len(args), filePath)
 
 		normalizedPath := util.NormalizePath(filePath)
 
@@ -644,10 +654,14 @@ func (p *CommandParser) handlePutMultiple(args []string) error {
 			}
 
 			conn.handleGetCommand(getCmd)
-			time.Sleep(100 * time.Millisecond)
+
+			for p.App.IsActiveTransferInProgress() {
+				time.Sleep(500 * time.Millisecond)
+			}
 		}
 	}
 
+	fmt.Println("Sequential upload completed.")
 	return nil
 }
 

@@ -674,13 +674,11 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		defer c.App.RemoveTransfer(transfer)
 		defer file.Close()
 
-		buffer := make([]byte, 262144)
+		buffer := make([]byte, 1048576)
 		totalSent := int64(0)
-		lastProgress := int64(0)
-		lastProgressBytes := int64(0)
 		startTime := time.Now()
-		lastSpeedUpdate := startTime
-		chunksSent := 0
+		lastProgressUpdate := startTime
+		lastProgressBytes := int64(0)
 
 		ackChan := make(chan bool, 1)
 		ackID := fmt.Sprintf("ack-%s-%d", filePath, time.Now().UnixNano())
@@ -695,6 +693,7 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		})
 		defer c.UnregisterResponseHandler(ackID)
 
+		chunkCount := 0
 		for {
 			if transfer.Status == TransferStatusPaused {
 				time.Sleep(100 * time.Millisecond)
@@ -726,40 +725,40 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 
 			totalSent += int64(n)
 			transfer.BytesTransferred = totalSent
-			chunksSent++
+			chunkCount++
 
-			progress := (totalSent * 100) / info.Size()
 			currentTime := time.Now()
-			timeForSpeed := currentTime.Sub(lastSpeedUpdate).Seconds()
+			timeSinceLastUpdate := currentTime.Sub(lastProgressUpdate).Seconds()
 
-			if totalSent-lastProgressBytes > 1048576 || progress > lastProgress+2 || timeForSpeed > 1.0 {
-				lastProgress = progress
-				lastProgressBytes = totalSent
+			if timeSinceLastUpdate >= 1.0 || totalSent == info.Size() {
 				elapsedTime := currentTime.Sub(startTime).Seconds()
+				var currentSpeed float64
 
-				var speed float64 = 0
-				if elapsedTime > 0 {
-
-					speed = float64(totalSent) / elapsedTime / 1024
-
-					if totalSent > 0 && (speed < 0.01 || timeForSpeed < 0.1) {
-						speed = 0.01
-					}
-
-					progMsg := Message{
-						Type: MsgTypeProgress,
-						Data: fmt.Sprintf("%s|%d|%d|%.2f", filePath, totalSent, info.Size(), speed),
-						ID:   ackID,
-					}
-					c.SendMessage(progMsg)
-
-					transfer.UpdateProgress(totalSent, speed)
-					lastSpeedUpdate = currentTime
+				if timeSinceLastUpdate > 0 {
+					bytesThisInterval := totalSent - lastProgressBytes
+					currentSpeed = float64(bytesThisInterval) / timeSinceLastUpdate / 1024
+				} else if elapsedTime > 0 {
+					currentSpeed = float64(totalSent) / elapsedTime / 1024
 				}
+
+				if currentSpeed < 0 {
+					currentSpeed = 0
+				}
+
+				transfer.UpdateProgress(totalSent, currentSpeed)
+				lastProgressUpdate = currentTime
+				lastProgressBytes = totalSent
+
+				progMsg := Message{
+					Type: MsgTypeProgress,
+					Data: fmt.Sprintf("%s|%d|%d|%.2f", filePath, totalSent, info.Size(), currentSpeed),
+					ID:   ackID,
+				}
+				c.SendMessage(progMsg)
 			}
 
-			if chunksSent%20 == 0 {
-				time.Sleep(5 * time.Millisecond)
+			if chunkCount%10 == 0 {
+				time.Sleep(1 * time.Millisecond)
 			}
 		}
 
@@ -779,9 +778,11 @@ func (c *Connection) handleGetCommand(cmd *Command) Message {
 		select {
 		case <-ackChan:
 			transfer.Status = TransferStatusComplete
+			fmt.Printf("\n")
 			c.Log.Success("Transfer completed and acknowledged: %s", filePath)
 		case <-time.After(30 * time.Second):
 			transfer.Status = TransferStatusFailed
+			fmt.Printf("\n")
 			c.Log.Error("Transfer timed out waiting for ACK: %s", filePath)
 		}
 	}()
